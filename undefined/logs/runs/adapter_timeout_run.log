@@ -1,0 +1,24 @@
+[2026-10-24T09:42:55.100Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-4eYfSt/p8","taskId":"369268cb-249a-465e-8238-9d4c2b39cc00","ownerId":"eng_p8","generation":1}
+[2026-10-24T09:42:55.106Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T09:42:55.150Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T09:46:11.148Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-ET6l5M/p8","taskId":"6c96aa7b-f80f-4350-b042-dbfddad4b366","ownerId":"eng_p8","generation":1}
+[2026-10-24T09:46:11.154Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T09:46:11.199Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T09:50:50.407Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-Hue3EQ/p8","taskId":"6e56ef31-41c2-48a9-8bd6-7daecccc4fac","ownerId":"eng_p8","generation":1}
+[2026-10-24T09:50:50.414Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T09:50:50.457Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T09:53:47.214Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-roBAnG/p8","taskId":"100ceb58-1423-42d0-b18a-387edee1ad07","ownerId":"eng_p8","generation":1}
+[2026-10-24T09:53:47.221Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T09:53:47.264Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T09:57:11.861Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-rEqCIf/p8","taskId":"ea5bd4da-17ff-4ee0-ac33-099da6b8e821","ownerId":"eng_p8","generation":1}
+[2026-10-24T09:57:11.867Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T09:57:11.913Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T09:58:55.768Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-DsAy4N/p8","taskId":"10171d69-7ce1-43fb-8268-cc9ab4473c7d","ownerId":"eng_p8","generation":1}
+[2026-10-24T09:58:55.774Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T09:58:55.819Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T10:00:50.500Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-ATpm5Y/p8","taskId":"dfc37461-4874-4e83-89a8-ad7b3f5c9674","ownerId":"eng_p8","generation":1}
+[2026-10-24T10:00:50.506Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T10:00:50.551Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}
+[2026-10-24T10:01:59.989Z] [run adapter_timeout_run] RUN_STARTED: {"provider":"codex","cwd":"/var/folders/wn/880tkpqs2gv0nh71c3nhp17m0000gp/T/taskaside-p8-ElGysK/p8","taskId":"59c6f6a3-8e66-4507-a907-d8d9e62645a8","ownerId":"eng_p8","generation":1}
+[2026-10-24T10:01:59.996Z] [run adapter_timeout_run] [seq 1] message.delta: {"messageId":"m1","delta":"Starting stream..."}
+[2026-10-24T10:02:00.040Z] [run adapter_timeout_run] [seq 2] failed: {"errorCode":"TIMEOUT","message":"Task exceeded execution deadline (enforced by adapter)"}

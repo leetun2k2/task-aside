@@ -1,0 +1,7 @@
+{"type":"thread.started","thread_id":"01a14e9f-37c0-7c10-9bf2-c322b571db93"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"item_0","type":"agent_message","text":"I’ll list the files in the current directory."}}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'ls -la'","aggregated_output":"","exit_code":null,"status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"/bin/zsh -lc 'ls -la'","aggregated_output":"total 8\ndrwxr-xr-x@  4 redacted-user  wheel   128 Oct 18 17:46 .\ndrwxrwxrwt  37 root    wheel  1184 Oct 18 17:46 ..\ndrwxr-xr-x@ 12 redacted-user  wheel   384 Oct 18 17:46 .git\n-rw-r--r--@  1 redacted-user  wheel   28 Oct 18 17:46 README.md\n","exit_code":0,"status":"completed"}}
+{"type":"item.completed","item":{"id":"item_2","type":"agent_message","text":"- `README.md`\n- `.git/` (directory)"}}
+{"type":"turn.completed","usage":{"input_tokens":36419,"cached_input_tokens":30208,"cache_write_input_tokens":0,"output_tokens":98,"reasoning_output_tokens":19}}

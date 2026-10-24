@@ -1,0 +1,11 @@
+# Dependencies
+node_modules/
+.bun/
+
+# Build artifacts
+dist/
+build/
+.cache/
+
+# Local orchestrator scratch and checkpoints
+.taskaside-implementation/

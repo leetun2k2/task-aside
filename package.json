@@ -1,0 +1,69 @@
+{
+  "name": "taskaside",
+  "version": "0.1.0",
+  "type": "module",
+  "bin": {
+    "taskaside": "./bin/taskaside.js"
+  },
+  "files": [
+    "bin",
+    "dist",
+    "package.json",
+    "README.md"
+  ],
+  "scripts": {
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check .",
+    "format": "prettier --write .",
+    "format:check": "prettier --check .",
+    "build:ui": "vite build",
+    "build:services": "bun build src/cmd/backend.ts --target bun --outfile dist/services/backend.js && bun build src/cmd/agent-adapter.ts --target bun --outfile dist/services/agent-adapter.js && bun build src/cmd/execution-engine.ts --target bun --outfile dist/services/execution-engine.js && bun build src/cmd/cli.ts --target bun --outfile dist/services/cli.js",
+    "build": "vite build && bun run build:services",
+    "test:contracts": "bun run src/contracts/contract-checks.ts",
+    "test:services": "bun run src/supervisor/service-checks.ts",
+    "test:supervisor": "bun run src/supervisor/supervisor-harden-checks.ts",
+    "test:harness": "bun run src/harness/harness-checks.ts",
+    "test:db": "bun run src/backend/db-checks.ts",
+    "test:api": "bun run src/backend/api-checks.ts",
+    "test:runs": "bun run src/backend/run-checks.ts",
+    "test:events": "bun run src/backend/event-checks.ts",
+    "test:mcp": "bun run src/backend/mcp-checks.ts",
+    "test:projection": "bun run src/backend/projection-checks.ts",
+    "test:adapter": "bun run src/agent-adapter/adapter-checks.ts",
+    "test:codex": "bun run src/agent-adapter/codex-checks.ts",
+    "test:claude": "bun run src/agent-adapter/claude-checks.ts",
+    "test:safety": "bun run src/agent-adapter/safety-checks.ts",
+    "test:engine": "bun run src/execution-engine/engine-checks.ts",
+    "test:startup": "bun run src/execution-engine/startup-checks.ts",
+    "test:pool": "bun run src/execution-engine/pool-checks.ts",
+    "test:ui": "bun run src/frontend/ui-checks.ts",
+    "test:workflow": "bun run src/frontend/workflow-checks.ts",
+    "test:distribution": "bun run src/distribution/distribution-checks.ts",
+    "test:cross-os": "bun run src/distribution/cross-os-checks.ts",
+    "test:release-candidate": "bun run src/distribution/release-candidate-checks.ts",
+    "start": "bun run src/cmd/cli.ts start",
+    "status": "bun run src/cmd/cli.ts status",
+    "stop": "bun run src/cmd/cli.ts stop"
+  },
+  "dependencies": {
+    "bun": "^1.4.3",
+    "hono": "^4.6.0",
+    "marked": "^18.1.1",
+    "react": "^18.3.1",
+    "react-dom": "^18.3.1",
+    "zod": "^4.6.7"
+  },
+  "devDependencies": {
+    "@biomejs/biome": "^1.9.0",
+    "@types/bun": "^1.1.0",
+    "@types/react": "^18.3.0",
+    "@types/react-dom": "^18.3.0",
+    "@vitejs/plugin-react": "^4.3.0",
+    "prettier": "3.9.10",
+    "typescript": "^5.6.0",
+    "vite": "^5.4.0"
+  },
+  "trustedDependencies": [
+    "@biomejs/biome"
+  ]
+}
