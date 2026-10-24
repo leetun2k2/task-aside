@@ -21,6 +21,12 @@ import {
   type BackendClient,
   BackendClientError,
 } from './client.ts';
+import {
+  EventForwarder,
+  type PendingDelta,
+  type RunStreamState,
+  freshStreamState,
+} from './event-forwarder.ts';
 import { buildTaskInstruction } from './instruction-builder.ts';
 import type { TaskScheduler } from './scheduler.ts';
 import type {
@@ -31,30 +37,7 @@ import type {
   TaskRecord,
 } from './types.ts';
 
-interface PendingDelta {
-  runId: string;
-  generation: number;
-  messageId: string;
-  accumulatedDelta: string;
-  lastSequence: number;
-  timestamp: string;
-}
-
-interface RunStreamState {
-  pendingDelta: PendingDelta | null;
-  deltaTimer: ReturnType<typeof setTimeout> | null;
-  lastAcknowledgedSequence: number;
-  forwardedEvents: EventEnvelope[];
-}
-
-function freshStreamState(startAfter: number): RunStreamState {
-  return {
-    pendingDelta: null,
-    deltaTimer: null,
-    lastAcknowledgedSequence: startAfter,
-    forwardedEvents: [],
-  };
-}
+export { EventForwarder, type PendingDelta, type RunStreamState, freshStreamState };
 
 export interface DispatchTaskParams {
   task: TaskRecord;
@@ -70,8 +53,7 @@ export class RunDispatcher {
   private adapterClient: AdapterClient;
   private scheduler: TaskScheduler;
   private options: DispatcherOptions;
-
-  private runStates = new Map<string, RunStreamState>();
+  private forwarder: EventForwarder;
 
   constructor(
     backendClient: BackendClient,
@@ -83,34 +65,26 @@ export class RunDispatcher {
     this.adapterClient = adapterClient;
     this.scheduler = scheduler;
     this.options = options;
+    this.forwarder = new EventForwarder(backendClient, options);
   }
 
   private stateFor(runId: string): RunStreamState {
-    let state = this.runStates.get(runId);
-    if (!state) {
-      state = freshStreamState(0);
-      this.runStates.set(runId, state);
-    }
-    return state;
+    return this.forwarder.stateFor(runId);
   }
 
   getLastAcknowledgedSequence(runId: string): number {
-    return this.runStates.get(runId)?.lastAcknowledgedSequence ?? 0;
+    return this.forwarder.getLastAcknowledgedSequence(runId);
   }
 
   getForwardedEvents(runId: string): EventEnvelope[] {
-    return [...(this.runStates.get(runId)?.forwardedEvents ?? [])];
+    return this.forwarder.getForwardedEvents(runId);
   }
 
   /** Retires a run's stream state — call once its monitoring has definitely
    * ended (terminal finalize, uncertain, or resume handed off) so slots don't
    * leak timers/memory across reuse. */
   private retire(runId: string): void {
-    const state = this.runStates.get(runId);
-    if (state?.deltaTimer) {
-      clearTimeout(state.deltaTimer);
-    }
-    this.runStates.delete(runId);
+    this.forwarder.retire(runId);
   }
 
   /**
@@ -118,31 +92,7 @@ export class RunDispatcher {
    * run's isolated state.
    */
   async flushPendingDelta(runId: string): Promise<void> {
-    const state = this.stateFor(runId);
-    if (state.deltaTimer) {
-      clearTimeout(state.deltaTimer);
-      state.deltaTimer = null;
-    }
-    if (!state.pendingDelta) {
-      return;
-    }
-
-    const delta = state.pendingDelta;
-    state.pendingDelta = null;
-
-    const event: EventEnvelope = {
-      runId: delta.runId,
-      sequence: delta.lastSequence,
-      type: 'message.delta',
-      timestamp: delta.timestamp,
-      data: {
-        messageId: delta.messageId,
-        delta: delta.accumulatedDelta,
-      },
-    };
-
-    await this.forwardWithRetry(delta.runId, delta.generation, [event]);
-    state.lastAcknowledgedSequence = Math.max(state.lastAcknowledgedSequence, delta.lastSequence);
+    return this.forwarder.flushPendingDelta(runId);
   }
 
   /**
@@ -155,43 +105,7 @@ export class RunDispatcher {
     events: EventEnvelope[],
     headers?: Record<string, string>,
   ): Promise<void> {
-    const maxRetries = this.options.maxRetries ?? 3;
-    let attempt = 0;
-    const state = this.stateFor(runId);
-
-    while (true) {
-      attempt++;
-      try {
-        // Extra headers (such as x-simulate-lost-ack) are applied on attempt 1;
-        // subsequent retries send the clean request to verify idempotent recovery.
-        const requestHeaders = attempt === 1 ? headers : undefined;
-        await this.backendClient.postEvents(
-          runId,
-          {
-            ownerId: this.options.ownerId,
-            generation,
-            events,
-          },
-          requestHeaders,
-        );
-        state.forwardedEvents.push(...events);
-        return;
-      } catch (err: unknown) {
-        if (err instanceof BackendClientError) {
-          // Stale generation or sequence conflict is non-retriable
-          if (err.status === 409) {
-            throw err;
-          }
-          if (err.status < 500 && err.status !== 408) {
-            throw err;
-          }
-        }
-        if (attempt >= maxRetries) {
-          throw err;
-        }
-        await new Promise((r) => setTimeout(r, this.options.retryDelayMs ?? 20));
-      }
-    }
+    return this.forwarder.forwardWithRetry(runId, generation, events, headers);
   }
 
   /**
@@ -309,7 +223,7 @@ export class RunDispatcher {
 
     // Fresh isolated stream state for this attempt — never reuses a prior
     // attempt's cursor/delta/timer, even if a slot is reused for a different run.
-    this.runStates.set(runId, freshStreamState(0));
+    this.forwarder.initRun(runId, 0);
 
     // 1. Backend claim strictly precedes adapter start.
     // Instruction is compiled from bounded context.
@@ -424,66 +338,22 @@ export class RunDispatcher {
     heartbeatAbortedRef?: { current: boolean };
   }): Promise<DispatchResult> {
     const { runId, taskId, generation, startAfter = 0, simulateLostAck } = params;
-    const state = this.stateFor(runId);
+    const state = this.forwarder.initRun(runId, startAfter);
     let currentAfter = startAfter;
-    state.lastAcknowledgedSequence = startAfter;
-    state.pendingDelta = null;
     let isTerminal = false;
     let terminalStatus: 'done' | 'error' | 'cancelled' | 'hitl' | null = null;
 
     const handleIncomingEvent = async (event: EventEnvelope) => {
-      if (event.type === 'message.delta') {
-        // Delta event: coalesce consecutive deltas for the same messageId
-        if (state.pendingDelta && state.pendingDelta.messageId === event.data.messageId) {
-          state.pendingDelta.accumulatedDelta += event.data.delta;
-          state.pendingDelta.lastSequence = event.sequence;
-          state.pendingDelta.timestamp = event.timestamp;
-        } else {
-          // New message delta: flush existing pending delta first
-          await this.flushPendingDelta(runId);
-          state.pendingDelta = {
-            runId,
-            generation,
-            messageId: event.data.messageId,
-            accumulatedDelta: event.data.delta,
-            lastSequence: event.sequence,
-            timestamp: event.timestamp,
-          };
-        }
-
-        // Start delta flush timer if not active
-        if (!state.deltaTimer) {
-          state.deltaTimer = setTimeout(() => {
-            this.flushPendingDelta(runId).catch(() => {});
-          }, this.options.deltaCoalesceMs ?? 20);
-        }
-      } else {
-        // Control or persistent event:
-        // Rule: deltas coalesce without delaying control events!
-        // Immediately flush any pending coalesced delta first.
-        await this.flushPendingDelta(runId);
-
-        // Forward control event with retry
-        const extraHeaders = simulateLostAck ? { 'x-simulate-lost-ack': 'true' } : undefined;
-
-        await this.forwardWithRetry(runId, generation, [event], extraHeaders);
-        state.lastAcknowledgedSequence = Math.max(state.lastAcknowledgedSequence, event.sequence);
-        currentAfter = state.lastAcknowledgedSequence;
-
-        // Terminal event detection
-        if (event.type === 'completed') {
-          isTerminal = true;
-          terminalStatus = 'done';
-        } else if (event.type === 'failed') {
-          isTerminal = true;
-          terminalStatus = 'error';
-        } else if (event.type === 'cancelled') {
-          isTerminal = true;
-          terminalStatus = 'cancelled';
-        } else if (event.type === 'input_required') {
-          isTerminal = true;
-          terminalStatus = 'hitl';
-        }
+      const ingestResult = await this.forwarder.ingestEvent({
+        runId,
+        generation,
+        event,
+        simulateLostAck,
+      });
+      currentAfter = ingestResult.sequence;
+      if (ingestResult.isTerminal) {
+        isTerminal = true;
+        terminalStatus = ingestResult.terminalStatus;
       }
     };
 

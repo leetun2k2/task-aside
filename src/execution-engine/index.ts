@@ -5,6 +5,7 @@ export * from './types.ts';
 export * from './client.ts';
 export * from './instruction-builder.ts';
 export * from './scheduler.ts';
+export * from './event-forwarder.ts';
 export * from './dispatcher.ts';
 export * from './reconciler.ts';
 export * from './hitl.ts';

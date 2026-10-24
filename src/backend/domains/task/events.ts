@@ -9,7 +9,7 @@ import {
   PERSISTENT_EVENT_TYPES,
   computeEventHash,
 } from '../../../contracts/event.ts';
-import { DomainError } from '../../api/errors.ts';
+import { DomainError } from '../../errors.ts';
 import { eventHub } from '../../events/hub.ts';
 import { assertFencingMatches, getLockForRun, requireRun, requireTask } from './runs.ts';
 
@@ -128,6 +128,7 @@ export function ingestEvents(
       eventHub.publish({
         type: 'message.delta',
         data: {
+          taskId: run.task_id,
           runId,
           messageId: event.data.messageId,
           delta: event.data.delta,
@@ -142,6 +143,7 @@ export function ingestEvents(
           conversationId: task.conversationId,
           role: 'agent',
           content: event.data.content,
+          runId,
           createdAt: event.timestamp || now,
         },
       });

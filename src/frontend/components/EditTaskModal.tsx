@@ -1,6 +1,8 @@
 // Edit Task modal dialog (SPECIFICATION.md §2 T-01, PRD §3).
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { Task, TaskPriority, UpdateTaskInput } from '../../contracts/task.ts';
+import { Button } from './ui/Button.tsx';
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/Dialog.tsx';
 
 interface EditTaskModalProps {
   task: Task | null;
@@ -16,14 +18,22 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
+  const boundTaskIdRef = useRef<string | null>(null);
+
+  // Synchronize form values strictly when task or modal open state changes
   useEffect(() => {
-    if (task) {
-      setTitle(task.title);
-      setDescription(task.description ?? '');
-      setPriority(task.priority);
-      setError(null);
+    if (isOpen && task) {
+      if (boundTaskIdRef.current !== task.id) {
+        boundTaskIdRef.current = task.id;
+        setTitle(task.title);
+        setDescription(task.description ?? '');
+        setPriority(task.priority);
+        setError(null);
+      }
+    } else if (!isOpen) {
+      boundTaskIdRef.current = null;
     }
-  }, [task]);
+  }, [isOpen, task]);
 
   if (!isOpen || !task) return null;
 
@@ -31,6 +41,8 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     if (isProcessing) {
       setError('Cannot edit a task while it is processing');
       return;
@@ -40,40 +52,42 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
       return;
     }
 
+    const targetTaskId = task.id;
+
     try {
       setIsSubmitting(true);
       setError(null);
-      await onSubmit(task.id, {
+      await onSubmit(targetTaskId, {
         title: title.trim(),
         description: description.trim() || undefined,
         priority,
       });
-      onClose();
+
+      // Guard against race conditions if task selection switched while in-flight
+      if (boundTaskIdRef.current === targetTaskId) {
+        onClose();
+      }
     } catch (err: unknown) {
-      setError(err instanceof Error ? err.message : 'Failed to update task');
+      // If task switched during save, ignore error from stale task
+      if (boundTaskIdRef.current === targetTaskId) {
+        setError(err instanceof Error ? err.message : 'Failed to update task');
+      }
     } finally {
-      setIsSubmitting(false);
+      if (boundTaskIdRef.current === targetTaskId) {
+        setIsSubmitting(false);
+      }
     }
   };
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click closes modal
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
-      <dialog
-        open
-        className="modal-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
-        aria-labelledby="edit-modal-title"
-      >
-        <div className="modal-header">
-          <h2 id="edit-modal-title" className="modal-title">
-            Edit Task #{task.id}
-          </h2>
-          <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle id="edit-modal-title">Edit Task #{task.id}</DialogTitle>
+          <DialogClose className="modal-close-btn" aria-label="Close">
             ✕
-          </button>
-        </div>
+          </DialogClose>
+        </DialogHeader>
 
         <form onSubmit={handleSubmit}>
           <div className="modal-body">
@@ -139,24 +153,20 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
           </div>
 
           <div className="modal-footer">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={onClose}
-              disabled={isSubmitting}
-            >
+            <Button type="button" variant="secondary" onClick={onClose} disabled={isSubmitting}>
               Cancel
-            </button>
-            <button
+            </Button>
+            <Button
               type="submit"
-              className="btn btn-primary"
+              variant="primary"
+              isLoading={isSubmitting}
               disabled={isProcessing || isSubmitting}
             >
               {isSubmitting ? 'Saving...' : 'Save Changes'}
-            </button>
+            </Button>
           </div>
         </form>
-      </dialog>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

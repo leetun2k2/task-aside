@@ -4,7 +4,11 @@ import { mkdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { Hono } from 'hono';
-import type { AgentDriver, DriverCallbacks, DriverCancelResult } from '../agent-adapter/drivers/types.ts';
+import type {
+  AgentDriver,
+  DriverCallbacks,
+  DriverCancelResult,
+} from '../agent-adapter/drivers/types.ts';
 import { AdapterRunManager } from '../agent-adapter/manager.ts';
 import { createAdapterApp } from '../agent-adapter/service.ts';
 import type { AdapterRun } from '../agent-adapter/types.ts';
@@ -125,7 +129,10 @@ export async function runLiveWorkflowChecks(): Promise<void> {
           sequence: 1,
           type: 'message.delta',
           timestamp: new Date().toISOString(),
-          data: { messageId: `msg_codex_${codexRunsCount}`, delta: 'Analyzing project codebase...' },
+          data: {
+            messageId: `msg_codex_${codexRunsCount}`,
+            delta: 'Analyzing project codebase...',
+          },
         });
         // Emit completed message
         callbacks.onEvent({
@@ -320,7 +327,10 @@ export async function runLiveWorkflowChecks(): Promise<void> {
       baseUrl: backendUrl,
       token: browserToken,
     });
-    assert(fetchedTaskCodex.status === 'done', 'UI task state must be done from authoritative REST');
+    assert(
+      fetchedTaskCodex.status === 'done',
+      'UI task state must be done from authoritative REST',
+    );
 
     // 1.5 UI verifies conversation: agent message committed and rendered
     const msgsCodex = await fetchMessages(taskCodex.id, undefined, {
@@ -379,7 +389,10 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     });
 
     assert(dispatchResultClaude.status === 'done', 'claude turn 1 must complete to done');
-    assert(dispatchResultClaude.verifiedStopped === true, 'claude turn 1 must have verified stop proof');
+    assert(
+      dispatchResultClaude.verifiedStopped === true,
+      'claude turn 1 must have verified stop proof',
+    );
     assert(
       claudeSessionIdPinned === 'session_claude_workflow_pin_1',
       'claude session id must be pinned',
@@ -588,7 +601,10 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     const doneGroup = stateGroups.find((g) => g.value === 'done');
     assert(doneGroup?.isDefaultCollapsed === true, 'done group must be default collapsed');
     const cancelledGroup = stateGroups.find((g) => g.value === 'cancelled');
-    assert(cancelledGroup?.isDefaultCollapsed === true, 'cancelled group must be default collapsed');
+    assert(
+      cancelledGroup?.isDefaultCollapsed === true,
+      'cancelled group must be default collapsed',
+    );
     const todoGroup = stateGroups.find((g) => g.value === 'todo');
     assert(todoGroup?.isDefaultCollapsed === false, 'todo group must not be default collapsed');
 
@@ -642,7 +658,10 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     assert(initialSettings.defaultProvider === 'codex', 'initial provider must be codex');
     assert(initialSettings.maxConcurrency === 8, 'initial maxConcurrency must be 8');
     assert(initialSettings.diagnostics.service === 'backend', 'service diagnostic must be backend');
-    assert(typeof initialSettings.diagnostics.uptimeSeconds === 'number', 'uptimeSeconds must be number');
+    assert(
+      typeof initialSettings.diagnostics.uptimeSeconds === 'number',
+      'uptimeSeconds must be number',
+    );
     assert(initialSettings.diagnostics.tasksCount >= 3, 'tasksCount must reflect created tasks');
 
     // Update settings: change to claude, concurrency 6
@@ -719,9 +738,12 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     // =========================================================================
     console.log('8. Checking SSE Disconnect, Reconnect & Transient Delta Dropping...');
 
-    const sseRes = await fetch(`${backendUrl}/api/events?token=${encodeURIComponent(browserToken)}`, {
-      headers: { Accept: 'text/event-stream' },
-    });
+    const sseRes = await fetch(
+      `${backendUrl}/api/events?token=${encodeURIComponent(browserToken)}`,
+      {
+        headers: { Accept: 'text/event-stream' },
+      },
+    );
     assert(sseRes.ok, 'SSE connection must succeed');
     if (!sseRes.body) {
       throw new Error('SSE body must not be null');

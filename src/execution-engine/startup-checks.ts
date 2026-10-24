@@ -87,7 +87,10 @@ async function createDisposableRepo(backendPort: number, name: string): Promise<
     displayPath: dir,
     defaultProvider: 'codex',
   });
-  assert(res.status === 201, `expected 201 creating repo ${name}, got ${res.status}: ${JSON.stringify(res.body)}`);
+  assert(
+    res.status === 201,
+    `expected 201 creating repo ${name}, got ${res.status}: ${JSON.stringify(res.body)}`,
+  );
   return res.body.id as string;
 }
 
@@ -199,7 +202,10 @@ async function main(): Promise<void> {
         }
         return undefined;
       });
-      assert(finalTask.status === 'done', `expected repo B task to reach done, got ${finalTask.status}`);
+      assert(
+        finalTask.status === 'done',
+        `expected repo B task to reach done, got ${finalTask.status}`,
+      );
     });
 
     // A11 (bounded demonstration, not full OS-level proof — see report):
@@ -366,7 +372,10 @@ async function main(): Promise<void> {
           });
 
           const cancelRes = await req(crashBackend.port, 'POST', `/api/tasks/${taskId}/cancel`);
-          assert(cancelRes.status === 200, `cancel request failed: ${JSON.stringify(cancelRes.body)}`);
+          assert(
+            cancelRes.status === 200,
+            `cancel request failed: ${JSON.stringify(cancelRes.body)}`,
+          );
           // Cooperative cancel: task must NOT be cancelled yet (no verified
           // stop proof exists the instant the request is accepted).
           assert(

@@ -6,7 +6,7 @@ import type {
   Settings,
   UpdateSettingsInput,
 } from '../../../contracts/index.ts';
-import { DomainError } from '../../api/errors.ts';
+import { DomainError } from '../../errors.ts';
 
 interface SettingsRow {
   id: number;

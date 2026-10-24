@@ -1,4 +1,6 @@
 // Executable contract verification suite. Run: bun run src/contracts/contract-checks.ts
+import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { join } from 'node:path';
 import {
   CancelRunRequestSchema,
   CapabilitiesResponseSchema,
@@ -287,6 +289,116 @@ check('child: within limit when fewer than max children', () => {
 
 check('child: rejects at/over the 5-child ceiling', () => {
   assert(!isWithinChildLimit(MAX_CHILDREN_PER_TASK), 'expected count at ceiling to be rejected');
+});
+
+// --- Architecture and Import Boundaries (RF-38) ------------------------------
+
+function collectSourceFiles(dir: string): string[] {
+  let fileList: string[] = [];
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) {
+      fileList = fileList.concat(collectSourceFiles(full));
+    } else if (full.endsWith('.ts') || full.endsWith('.tsx')) {
+      fileList.push(full);
+    }
+  }
+  return fileList;
+}
+
+function findBoundaryViolations(
+  files: { path: string; content: string }[],
+): { file: string; spec: string; rule: string }[] {
+  const importRegex = /(?:import|from)\s+['"]([^'"]+)['"]/g;
+  const violations: { file: string; spec: string; rule: string }[] = [];
+
+  for (const file of files) {
+    const matches = file.content.matchAll(importRegex);
+    for (const match of matches) {
+      const spec = match[1];
+
+      // Rule 1: Contracts cannot import services/backend/frontend/bun:sqlite
+      if (file.path.startsWith('src/contracts/') && !file.path.endsWith('-checks.ts')) {
+        if (
+          spec.includes('backend') ||
+          spec.includes('frontend') ||
+          spec.includes('agent-adapter') ||
+          spec.includes('execution-engine') ||
+          spec.includes('supervisor') ||
+          spec.includes('bun:sqlite')
+        ) {
+          violations.push({
+            file: file.path,
+            spec,
+            rule: 'Contracts cannot import implementation layers',
+          });
+        }
+      }
+
+      // Rule 2: Frontend runtime cannot import backend/adapter/engine/supervisor or server APIs
+      if (file.path.startsWith('src/frontend/') && !file.path.endsWith('-checks.ts')) {
+        if (
+          spec.includes('backend') ||
+          spec.includes('agent-adapter') ||
+          spec.includes('execution-engine') ||
+          spec.includes('supervisor') ||
+          spec.includes('bun:sqlite') ||
+          spec === 'node:child_process'
+        ) {
+          violations.push({
+            file: file.path,
+            spec,
+            rule: 'Frontend cannot import backend/services or server-only APIs',
+          });
+        }
+      }
+
+      // Rule 3: bun:sqlite only allowed in backend and harness
+      if (
+        !file.path.startsWith('src/backend/') &&
+        !file.path.startsWith('src/harness/') &&
+        !file.path.endsWith('-checks.ts')
+      ) {
+        if (spec === 'bun:sqlite') {
+          violations.push({
+            file: file.path,
+            spec,
+            rule: 'Only backend and harness may import bun:sqlite',
+          });
+        }
+      }
+    }
+  }
+
+  return violations;
+}
+
+check('boundary: current source code has zero cross-owner import boundary violations', () => {
+  const filePaths = collectSourceFiles('src');
+  const files = filePaths.map((p) => ({ path: p, content: readFileSync(p, 'utf8') }));
+  const violations = findBoundaryViolations(files);
+  assert(
+    violations.length === 0,
+    `Found boundary violations: ${violations.map((v) => `${v.file} -> ${v.spec} (${v.rule})`).join(', ')}`,
+  );
+});
+
+check('boundary: rejects temporary forbidden cross-owner import fixture', () => {
+  const forbiddenFixture = [
+    {
+      path: 'src/frontend/components/ForbiddenWidget.tsx',
+      content: `import { openDatabase } from '../../backend/db/connection.ts';\nexport function Widget() {}`,
+    },
+    {
+      path: 'src/contracts/forbidden.ts',
+      content: `import { runMigrations } from '../backend/db/migrations.ts';`,
+    },
+  ];
+  const violations = findBoundaryViolations(forbiddenFixture);
+  assert(
+    violations.length === 2,
+    `expected exactly 2 boundary violations detected for fixture, got ${violations.length}`,
+  );
 });
 
 // --- Report -------------------------------------------------------------

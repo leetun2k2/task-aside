@@ -17,7 +17,6 @@ import {
   isWithinChildLimit,
 } from '../../contracts/mcp.ts';
 import type { TaskPriority, TaskStatus } from '../../contracts/task.ts';
-import { DomainError } from '../api/errors.ts';
 import { appendMessage, listMessages } from '../domains/chat/messages.ts';
 import { getRepositoryById } from '../domains/task/repositories.ts';
 import { recordYieldIntent } from '../domains/task/runs.ts';
@@ -30,6 +29,7 @@ import {
   getTaskById,
   rowToTask,
 } from '../domains/task/tasks.ts';
+import { DomainError } from '../errors.ts';
 import { eventHub } from '../events/hub.ts';
 import type { McpAuthContext } from './tokens.ts';
 
@@ -367,9 +367,10 @@ function executeCreateTask(
     .query(
       'SELECT payload_hash, task_id FROM external_task_receipts WHERE token_id = ? AND idempotency_key = ?',
     )
-    .get(authContext.tokenId, params.idempotencyKey) as
-    | { payload_hash: string; task_id: string }
-    | null;
+    .get(authContext.tokenId, params.idempotencyKey) as {
+    payload_hash: string;
+    task_id: string;
+  } | null;
 
   if (existingReceipt) {
     if (existingReceipt.payload_hash !== payloadHash) {

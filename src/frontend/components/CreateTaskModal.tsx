@@ -1,6 +1,8 @@
 // Create Task modal dialog (SPECIFICATION.md §2 T-01, PRD §3).
-import { useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import type { CreateTaskInput, Repository, TaskPriority } from '../../contracts/task.ts';
+import { Button } from './ui/Button.tsx';
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/Dialog.tsx';
 
 interface CreateTaskModalProps {
   isOpen: boolean;
@@ -25,17 +27,37 @@ export function CreateTaskModal({
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
-  if (!isOpen) return null;
+  const prevOpenRef = useRef(false);
+
+  // Reset form whenever modal opens or parentId changes
+  useEffect(() => {
+    if (isOpen && !prevOpenRef.current) {
+      setTitle('');
+      setDescription('');
+      setPriority('P2');
+      setParentId(prefillParentId ?? '');
+      setRepoId(repositories[0]?.id ?? '');
+      setError(null);
+    }
+    prevOpenRef.current = isOpen;
+  }, [isOpen, prefillParentId, repositories]);
+
+  // Support late-loaded repositories if repoId is unselected
+  useEffect(() => {
+    if (isOpen && !repoId && repositories.length > 0) {
+      setRepoId(repositories[0].id);
+    }
+  }, [isOpen, repoId, repositories]);
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (isSubmitting) return;
+
     if (!title.trim()) {
       setError('Title is required');
       return;
     }
-    if (!repoId && repositories.length > 0) {
-      setRepoId(repositories[0].id);
-    }
+
     const targetRepoId = repoId || (repositories[0] ? repositories[0].id : '');
     if (!targetRepoId) {
       setError('Please select or register a repository first');
@@ -52,7 +74,7 @@ export function CreateTaskModal({
         priority,
         parentId: parentId.trim() || undefined,
       });
-      // Reset form
+      // Reset on success
       setTitle('');
       setDescription('');
       setParentId('');
@@ -65,23 +87,14 @@ export function CreateTaskModal({
   };
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click closes modal
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
-      <dialog
-        open
-        className="modal-dialog"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
-        aria-labelledby="modal-title"
-      >
-        <div className="modal-header">
-          <h2 id="modal-title" className="modal-title">
-            New Task
-          </h2>
-          <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent>
+        <DialogHeader>
+          <DialogTitle id="modal-title">New Task</DialogTitle>
+          <DialogClose className="modal-close-btn" aria-label="Close">
             ✕
-          </button>
-        </div>
+          </DialogClose>
+        </DialogHeader>
 
         <form onSubmit={handleSubmit}>
           <div className="modal-body">
@@ -103,6 +116,7 @@ export function CreateTaskModal({
                 value={title}
                 onChange={(e) => setTitle(e.target.value)}
                 required
+                disabled={isSubmitting}
               />
             </div>
 
@@ -116,12 +130,17 @@ export function CreateTaskModal({
                   className="form-select"
                   value={repoId || (repositories[0]?.id ?? '')}
                   onChange={(e) => setRepoId(e.target.value)}
+                  disabled={isSubmitting || repositories.length === 0}
                 >
-                  {repositories.map((repo) => (
-                    <option key={repo.id} value={repo.id}>
-                      {repo.name} ({repo.displayPath})
-                    </option>
-                  ))}
+                  {repositories.length === 0 ? (
+                    <option value="">No repositories registered</option>
+                  ) : (
+                    repositories.map((repo) => (
+                      <option key={repo.id} value={repo.id}>
+                        {repo.name} ({repo.displayPath})
+                      </option>
+                    ))
+                  )}
                 </select>
               </div>
 
@@ -134,6 +153,7 @@ export function CreateTaskModal({
                   className="form-select"
                   value={priority}
                   onChange={(e) => setPriority(e.target.value as TaskPriority)}
+                  disabled={isSubmitting}
                 >
                   <option value="P0">P0 · Critical</option>
                   <option value="P1">P1 · High</option>
@@ -154,6 +174,7 @@ export function CreateTaskModal({
                 placeholder="Leave empty for root task"
                 value={parentId}
                 onChange={(e) => setParentId(e.target.value)}
+                disabled={isSubmitting}
               />
             </div>
 
@@ -168,25 +189,26 @@ export function CreateTaskModal({
                 placeholder="Task details, instructions, or acceptance requirements..."
                 value={description}
                 onChange={(e) => setDescription(e.target.value)}
+                disabled={isSubmitting}
               />
             </div>
           </div>
 
           <div className="modal-footer">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              onClick={onClose}
-              disabled={isSubmitting}
-            >
+            <Button type="button" variant="secondary" onClick={onClose} disabled={isSubmitting}>
               Cancel
-            </button>
-            <button type="submit" className="btn btn-primary" disabled={isSubmitting}>
+            </Button>
+            <Button
+              type="submit"
+              variant="primary"
+              isLoading={isSubmitting}
+              disabled={isSubmitting || repositories.length === 0}
+            >
               {isSubmitting ? 'Creating...' : 'Create Task'}
-            </button>
+            </Button>
           </div>
         </form>
-      </dialog>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

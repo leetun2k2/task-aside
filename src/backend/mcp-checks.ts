@@ -4,7 +4,7 @@
 // child idempotency key deduplication, yield_task verified stop and lock release.
 
 import type { Database } from 'bun:sqlite';
-import { readdirSync, rmSync } from 'node:fs';
+import { readFileSync, readdirSync, rmSync } from 'node:fs';
 import { join } from 'node:path';
 import { Hono } from 'hono';
 import { mountPublicApi } from './api/index.ts';
@@ -90,7 +90,14 @@ try {
   ).run('repo-2', 'test-repo-2', '/tmp/repo-2', '/tmp/repo-2', 'codex', now);
   db.query(
     'INSERT INTO repositories (id, name, display_path, canonical_path, default_provider, created_at) VALUES (?, ?, ?, ?, ?, ?)',
-  ).run('repo-forbidden', 'test-repo-forbidden', '/tmp/repo-forbidden', '/tmp/repo-forbidden', 'codex', now);
+  ).run(
+    'repo-forbidden',
+    'test-repo-forbidden',
+    '/tmp/repo-forbidden',
+    '/tmp/repo-forbidden',
+    'codex',
+    now,
+  );
 
   const rootTask = createTask(db, {
     repoId: 'repo-1',
@@ -563,8 +570,13 @@ try {
       assert(lockDuring.owner_run_id === runId, 'lock must stay held while intent is pending');
       assert(lockDuring.generation === generationBefore, 'generation must not change');
 
-      const taskDuring = db.query('SELECT * FROM tasks WHERE id = ?').get(rootTask.id) as TaskRowCheck;
-      assert(taskDuring.status === 'processing', 'task must stay processing while intent is pending');
+      const taskDuring = db
+        .query('SELECT * FROM tasks WHERE id = ?')
+        .get(rootTask.id) as TaskRowCheck;
+      assert(
+        taskDuring.status === 'processing',
+        'task must stay processing while intent is pending',
+      );
       assert(taskDuring.block_kind === null, 'task must not be blocked on children yet');
 
       const runDuring = db.query('SELECT * FROM runs WHERE id = ?').get(runId) as RunRowCheck;
@@ -598,7 +610,9 @@ try {
       verificationMethod: 'process_group_empty',
     });
 
-    const yieldedTask = db.query('SELECT * FROM tasks WHERE id = ?').get(rootTask.id) as TaskRowCheck;
+    const yieldedTask = db
+      .query('SELECT * FROM tasks WHERE id = ?')
+      .get(rootTask.id) as TaskRowCheck;
     assert(yieldedTask.status === 'todo', 'task should be in todo status post-finalize');
     assert(yieldedTask.block_kind === 'children', 'block_kind should be children');
     const blockedIds = JSON.parse(yieldedTask.blocked_on_child_ids ?? '[]');
@@ -658,8 +672,12 @@ try {
         ) {
           continue;
         }
-        const content = Bun.file(fullPath).text();
-        if (content.toString().includes('bun:sqlite')) {
+        const content = readFileSync(fullPath, 'utf8');
+        const isImport =
+          /(?:from\s+['"]bun:sqlite['"]|import\(['"]bun:sqlite['"]\)|require\(['"]bun:sqlite['"]\))/.test(
+            content,
+          );
+        if (isImport) {
           offenders.push(fullPath.replace(`${repoRoot}/`, ''));
         }
       }
@@ -690,7 +708,10 @@ try {
     const missingRepo = await request(
       'POST',
       '/mcp',
-      { name: 'create_task', arguments: { title: 'No repo given', idempotencyKey: 'k-missing-repo' } },
+      {
+        name: 'create_task',
+        arguments: { title: 'No repo given', idempotencyKey: 'k-missing-repo' },
+      },
       { authorization: `Bearer ${token}` },
     );
     assert(missingRepo.status === 400, `expected 400 on missing repoId, got ${missingRepo.status}`);
@@ -703,7 +724,10 @@ try {
       { name: 'create_task', arguments: { title: 'No key given', repoId: 'repo-1' } },
       { authorization: `Bearer ${token}` },
     );
-    assert(missingKey.status === 400, `expected 400 on missing idempotencyKey, got ${missingKey.status}`);
+    assert(
+      missingKey.status === 400,
+      `expected 400 on missing idempotencyKey, got ${missingKey.status}`,
+    );
     assert(missingKey.body.code === 'VALIDATION_ERROR', 'expected VALIDATION_ERROR');
 
     // Unknown repoId is not-found; no task created
@@ -712,7 +736,11 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Unknown repo', repoId: 'repo-does-not-exist', idempotencyKey: 'k-unknown' },
+        arguments: {
+          title: 'Unknown repo',
+          repoId: 'repo-does-not-exist',
+          idempotencyKey: 'k-unknown',
+        },
       },
       { authorization: `Bearer ${token}` },
     );
@@ -725,11 +753,18 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Forbidden repo', repoId: 'repo-forbidden', idempotencyKey: 'k-forbidden' },
+        arguments: {
+          title: 'Forbidden repo',
+          repoId: 'repo-forbidden',
+          idempotencyKey: 'k-forbidden',
+        },
       },
       { authorization: `Bearer ${token}` },
     );
-    assert(forbiddenRepo.status === 403, `expected 403 on forbidden repoId, got ${forbiddenRepo.status}`);
+    assert(
+      forbiddenRepo.status === 403,
+      `expected 403 on forbidden repoId, got ${forbiddenRepo.status}`,
+    );
     assert(forbiddenRepo.body.code === 'FORBIDDEN', 'expected FORBIDDEN');
 
     const tasksBeforeB = countTasksInRepo(db, 'repo-2');
@@ -746,7 +781,10 @@ try {
     );
     assert(createInB.status === 200, `expected 200 creating in repo-2, got ${createInB.status}`);
     const createdInB = createInB.body.result;
-    assert(createdInB.repoId === 'repo-2', `expected task created in repo-2, got ${createdInB.repoId}`);
+    assert(
+      createdInB.repoId === 'repo-2',
+      `expected task created in repo-2, got ${createdInB.repoId}`,
+    );
     assert(
       countTasksInRepo(db, 'repo-2') === tasksBeforeB + 1,
       'exactly one task must exist in repo-2 after creation',
@@ -807,7 +845,11 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Same key, different principal', repoId: 'repo-2', idempotencyKey: 'k-repo-b-1' },
+        arguments: {
+          title: 'Same key, different principal',
+          repoId: 'repo-2',
+          idempotencyKey: 'k-repo-b-1',
+        },
       },
       { authorization: `Bearer ${token2}` },
     );

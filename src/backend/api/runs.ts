@@ -17,20 +17,16 @@ import {
 } from '../../contracts/run.ts';
 import { internalAuth } from '../../supervisor/auth.ts';
 import { appendMessage, getConversationIdForTask } from '../domains/chat/messages.ts';
+import { admitNextEligibleTask, claimTask, listRunnableTasks } from '../domains/task/admission.ts';
+import { getTaskContext } from '../domains/task/context.ts';
 import { ingestEvents } from '../domains/task/events.ts';
 import {
-  admitNextEligibleTask,
-  claimTask,
   clearQuarantine,
   finalizeRun,
-  getRunStatus,
-  getTaskContext,
   heartbeat,
-  listActiveRuns,
-  listRunnableTasks,
   markUncertain,
-  requestTimeout,
-} from '../domains/task/runs.ts';
+} from '../domains/task/recovery.ts';
+import { getRunStatus, listActiveRuns, requestTimeout } from '../domains/task/runs.ts';
 import { mintManagedMcpToken } from '../mcp/tokens.ts';
 import { DomainError } from './errors.ts';
 

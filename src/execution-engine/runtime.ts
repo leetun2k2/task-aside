@@ -2,7 +2,7 @@
 // drives the scheduler/dispatcher/reconciler automatically at service startup
 // instead of leaving them as unused exports. Owns: startup reconciliation of
 // persisted runs, the poll-schedule-dispatch loop, matched-HITL-reply
-// resumption, and cooperative cancellation of live runs.
+// resumption, cooperative cancellation of live runs, and deadline enforcement.
 // Architecture boundary: no direct SQLite access in execution engine.
 import {
   BACKOFF_MAX_MS,
@@ -16,7 +16,7 @@ import type { AdapterClient, BackendClient } from './client.ts';
 import type { RunDispatcher } from './dispatcher.ts';
 import type { RunReconciler } from './reconciler.ts';
 import type { TaskScheduler } from './scheduler.ts';
-import type { DispatchResult, RunStatusRecord } from './types.ts';
+import type { ActiveRun, DispatchResult, RunStatusRecord } from './types.ts';
 
 export interface EngineRuntimeOptions {
   ownerId: string;
@@ -82,6 +82,10 @@ export class EngineRuntime {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // Lifecycle: Startup & Shutdown
+  // ---------------------------------------------------------------------------
+
   async start(): Promise<void> {
     await this.reconcileOnStartup();
     await this.scheduler
@@ -94,12 +98,11 @@ export class EngineRuntime {
   async stop(): Promise<void> {
     this.stopped = true;
 
-    // Drain in-flight dispatches for up to SHUTDOWN_DRAIN_MS (30s)
+    // 1. Drain in-flight dispatches within bounded grace period
     const drainDeadline = Date.now() + SHUTDOWN_DRAIN_MS;
-    while (this.inFlight.size > 0 && Date.now() < drainDeadline) {
-      await sleep(100);
-    }
+    await this.drainInFlight(drainDeadline);
 
+    // 2. Await loops to exit
     if (this.admissionLoopPromise) {
       await this.admissionLoopPromise;
     }
@@ -107,37 +110,55 @@ export class EngineRuntime {
       await this.controlLoopPromise;
     }
 
-    // Bounded termination for any still-active runs
+    // 3. Bounded termination for any still-active runs
+    await this.terminateActiveRunsOnShutdown();
+  }
+
+  private async drainInFlight(deadline: number): Promise<void> {
+    while (this.inFlight.size > 0 && Date.now() < deadline) {
+      await sleep(100);
+    }
+  }
+
+  private async terminateActiveRunsOnShutdown(): Promise<void> {
     const activeRuns = this.scheduler.getActiveRuns();
     for (const run of activeRuns) {
-      try {
-        const stopPromise = this.dispatcher.cancelRun(run.runId, run.generation);
-        const timeoutPromise = sleep(STOP_VERIFICATION_BOUND_MS).then(() => null);
-        const res = await Promise.race([stopPromise, timeoutPromise]);
-        if (!res || !res.verifiedStopped) {
-          try {
-            await this.backendClient.markUncertain(run.runId, {
-              ownerId: this.options.ownerId,
-              generation: run.generation,
-              reason: 'Shutdown: process stop unverified within bound',
-            });
-          } catch {
-            // Backend unreachable: leave existing reservation alone
-          }
-        }
-      } catch {
+      await this.terminateRunOnShutdown(run);
+    }
+  }
+
+  private async terminateRunOnShutdown(run: ActiveRun): Promise<void> {
+    try {
+      const stopPromise = this.dispatcher.cancelRun(run.runId, run.generation);
+      const timeoutPromise = sleep(STOP_VERIFICATION_BOUND_MS).then(() => null);
+      const res = await Promise.race([stopPromise, timeoutPromise]);
+      if (!res || !res.verifiedStopped) {
         try {
           await this.backendClient.markUncertain(run.runId, {
             ownerId: this.options.ownerId,
             generation: run.generation,
-            reason: 'Shutdown: process stop error',
+            reason: 'Shutdown: process stop unverified within bound',
           });
         } catch {
           // Backend unreachable: leave existing reservation alone
         }
       }
+    } catch {
+      try {
+        await this.backendClient.markUncertain(run.runId, {
+          ownerId: this.options.ownerId,
+          generation: run.generation,
+          reason: 'Shutdown: process stop error',
+        });
+      } catch {
+        // Backend unreachable: leave existing reservation alone
+      }
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Startup Reconciliation
+  // ---------------------------------------------------------------------------
 
   /**
    * Reconciles persisted active runs against real adapter process state
@@ -189,6 +210,10 @@ export class EngineRuntime {
       this.reportError(`startup reconciliation: failed to rehydrate run ${run.runId}`, err);
     }
   }
+
+  // ---------------------------------------------------------------------------
+  // Loops: Admission and Control
+  // ---------------------------------------------------------------------------
 
   private async admissionLoop(): Promise<void> {
     let backoffMs = 0;
@@ -250,40 +275,9 @@ export class EngineRuntime {
     }
   }
 
-  private async checkDeadlineTimeouts(): Promise<void> {
-    const now = Date.now();
-    for (const run of this.scheduler.getActiveRuns()) {
-      if (this.timeoutActioned.has(run.runId)) {
-        continue;
-      }
-      let status: RunStatusRecord;
-      try {
-        status = await this.backendClient.getRun(run.runId);
-      } catch {
-        continue;
-      }
-
-      const deadline = new Date(status.deadlineAt).getTime();
-      if (now >= deadline) {
-        this.timeoutActioned.add(run.runId);
-        try {
-          if (!status.timeoutRequestedAt) {
-            await this.backendClient.requestTimeout(run.runId).catch(() => {});
-          }
-          await this.dispatcher.enforceTimeout(run.runId, run.generation);
-        } catch (err) {
-          this.reportError(`enforceTimeout run ${run.runId}`, err);
-        }
-      }
-    }
-
-    const activeIds = new Set(this.scheduler.getActiveRuns().map((r) => r.runId));
-    for (const runId of [...this.timeoutActioned]) {
-      if (!activeIds.has(runId)) {
-        this.timeoutActioned.delete(runId);
-      }
-    }
-  }
+  // ---------------------------------------------------------------------------
+  // Dispatch Execution
+  // ---------------------------------------------------------------------------
 
   private dispatchClaimed(taskId: string, runId: string, generation: number): void {
     if (this.inFlight.has(runId)) {
@@ -291,33 +285,35 @@ export class EngineRuntime {
     }
     this.inFlight.add(runId);
 
-    (async () => {
-      try {
-        const [context, run] = await Promise.all([
-          this.backendClient.getTaskContext(taskId),
-          this.backendClient.getRun(runId),
-        ]);
-        const result = await this.dispatcher.dispatchTask({
-          task: context.task,
-          claim: { runId, generation },
-          context,
-          // The run's own `provider` column (set from the repo's
-          // defaultProvider at claim time) is authoritative — dispatchTask
-          // itself silently defaults to 'codex' when omitted, which would
-          // otherwise always run Codex regardless of what was configured.
-          provider: run.provider === 'claude' ? 'claude' : 'codex',
-          scenario: this.options.defaultScenario,
-        });
-        this.afterDispatch(runId, taskId, result);
-      } catch (err) {
-        this.reportError(`dispatch run ${runId}`, err);
-      } finally {
-        this.inFlight.delete(runId);
-      }
-    })().catch((err) => this.reportError(`dispatch run ${runId} (unhandled)`, err));
+    this.executeDispatch(taskId, runId, generation).finally(() => {
+      this.inFlight.delete(runId);
+    });
   }
 
-  private afterDispatch(runId: string, taskId: string, result: DispatchResult): void {
+  private async executeDispatch(taskId: string, runId: string, generation: number): Promise<void> {
+    try {
+      const [context, run] = await Promise.all([
+        this.backendClient.getTaskContext(taskId),
+        this.backendClient.getRun(runId),
+      ]);
+      const result = await this.dispatcher.dispatchTask({
+        task: context.task,
+        claim: { runId, generation },
+        context,
+        // The run's own `provider` column (set from the repo's
+        // defaultProvider at claim time) is authoritative — dispatchTask
+        // itself silently defaults to 'codex' when omitted, which would
+        // otherwise always run Codex regardless of what was configured.
+        provider: run.provider === 'claude' ? 'claude' : 'codex',
+        scenario: this.options.defaultScenario,
+      });
+      this.handleDispatchResult(runId, taskId, result);
+    } catch (err) {
+      this.reportError(`dispatch run ${runId}`, err);
+    }
+  }
+
+  private handleDispatchResult(runId: string, taskId: string, result: DispatchResult): void {
     if (result.status === 'hitl') {
       // Find the pending request id from the task context the dispatcher just
       // observed; re-fetch is cheap and keeps this method synchronous-ish.
@@ -332,6 +328,10 @@ export class EngineRuntime {
     }
   }
 
+  // ---------------------------------------------------------------------------
+  // HITL Resumption
+  // ---------------------------------------------------------------------------
+
   /**
    * Detects a matched HITL reply (the backend already atomically paired it in
    * `appendMessage` — pending_input_request_id cleared, run back to
@@ -340,46 +340,54 @@ export class EngineRuntime {
    */
   private async checkHitlResumes(): Promise<void> {
     for (const [runId, watch] of [...this.hitlWatches.entries()]) {
-      let run: RunStatusRecord;
-      try {
-        run = await this.backendClient.getRun(runId);
-      } catch {
-        this.hitlWatches.delete(runId);
-        continue;
-      }
-
-      if (run.status === 'hitl' || run.pendingInputRequestId) {
-        continue; // still waiting on a human reply
-      }
-      if (run.status !== 'running') {
-        // Run ended some other way (cancelled/finalized) while awaiting input.
-        this.hitlWatches.delete(runId);
-        continue;
-      }
-
-      this.hitlWatches.delete(runId);
-      try {
-        const context = await this.backendClient.getTaskContext(watch.taskId);
-        const reply = [...context.messages]
-          .reverse()
-          .find((m) => m.inReplyToRequestId === watch.requestId);
-
-        const result = await this.dispatcher.resumeHitlTask({
-          task: context.task,
-          claim: { runId, generation: run.generation },
-          context,
-          response: reply?.content ?? '',
-          requestId: watch.requestId,
-          provider: run.provider === 'claude' ? 'claude' : 'codex',
-          scenario: this.options.defaultScenario,
-        });
-
-        this.afterDispatch(runId, watch.taskId, result);
-      } catch (err) {
-        this.reportError(`resume hitl run ${runId}`, err);
-      }
+      await this.tryResumeHitlWatch(runId, watch);
     }
   }
+
+  private async tryResumeHitlWatch(runId: string, watch: HitlWatch): Promise<void> {
+    let run: RunStatusRecord;
+    try {
+      run = await this.backendClient.getRun(runId);
+    } catch {
+      this.hitlWatches.delete(runId);
+      return;
+    }
+
+    if (run.status === 'hitl' || run.pendingInputRequestId) {
+      return; // Still waiting on a human reply
+    }
+    if (run.status !== 'running') {
+      // Run ended some other way (cancelled/finalized) while awaiting input.
+      this.hitlWatches.delete(runId);
+      return;
+    }
+
+    this.hitlWatches.delete(runId);
+    try {
+      const context = await this.backendClient.getTaskContext(watch.taskId);
+      const reply = [...context.messages]
+        .reverse()
+        .find((m) => m.inReplyToRequestId === watch.requestId);
+
+      const result = await this.dispatcher.resumeHitlTask({
+        task: context.task,
+        claim: { runId, generation: run.generation },
+        context,
+        response: reply?.content ?? '',
+        requestId: watch.requestId,
+        provider: run.provider === 'claude' ? 'claude' : 'codex',
+        scenario: this.options.defaultScenario,
+      });
+
+      this.handleDispatchResult(runId, watch.taskId, result);
+    } catch (err) {
+      this.reportError(`resume hitl run ${runId}`, err);
+    }
+  }
+
+  // ---------------------------------------------------------------------------
+  // Cancellation and Deadline Enforcement
+  // ---------------------------------------------------------------------------
 
   /**
    * Detects a cooperative cancel request (set by
@@ -389,24 +397,7 @@ export class EngineRuntime {
    */
   private async checkCancelRequests(): Promise<void> {
     for (const run of this.scheduler.getActiveRuns()) {
-      if (this.cancelActioned.has(run.runId)) {
-        continue;
-      }
-      let status: RunStatusRecord;
-      try {
-        status = await this.backendClient.getRun(run.runId);
-      } catch {
-        continue;
-      }
-      if (!status.cancelRequestedAt) {
-        continue;
-      }
-      this.cancelActioned.add(run.runId);
-      try {
-        await this.dispatcher.cancelRun(run.runId, run.generation);
-      } catch (err) {
-        this.reportError(`cancel run ${run.runId}`, err);
-      }
+      await this.tryHandleCancelRequest(run);
     }
 
     // Bound memory: drop actioned entries for runs no longer tracked active.
@@ -414,6 +405,66 @@ export class EngineRuntime {
     for (const runId of [...this.cancelActioned]) {
       if (!activeIds.has(runId)) {
         this.cancelActioned.delete(runId);
+      }
+    }
+  }
+
+  private async tryHandleCancelRequest(run: ActiveRun): Promise<void> {
+    if (this.cancelActioned.has(run.runId)) {
+      return;
+    }
+    let status: RunStatusRecord;
+    try {
+      status = await this.backendClient.getRun(run.runId);
+    } catch {
+      return;
+    }
+    if (!status.cancelRequestedAt) {
+      return;
+    }
+    this.cancelActioned.add(run.runId);
+    try {
+      await this.dispatcher.cancelRun(run.runId, run.generation);
+    } catch (err) {
+      this.reportError(`cancel run ${run.runId}`, err);
+    }
+  }
+
+  private async checkDeadlineTimeouts(): Promise<void> {
+    const now = Date.now();
+    for (const run of this.scheduler.getActiveRuns()) {
+      await this.tryHandleDeadlineTimeout(run, now);
+    }
+
+    const activeIds = new Set(this.scheduler.getActiveRuns().map((r) => r.runId));
+    for (const runId of [...this.timeoutActioned]) {
+      if (!activeIds.has(runId)) {
+        this.timeoutActioned.delete(runId);
+      }
+    }
+  }
+
+  private async tryHandleDeadlineTimeout(run: ActiveRun, now: number): Promise<void> {
+    if (this.timeoutActioned.has(run.runId)) {
+      return;
+    }
+    let status: RunStatusRecord;
+    try {
+      status = await this.backendClient.getRun(run.runId);
+    } catch {
+      return;
+    }
+
+    const deadline = new Date(status.deadlineAt).getTime();
+    if (now >= deadline) {
+      this.timeoutActioned.add(run.runId);
+      try {
+        if (!status.timeoutRequestedAt) {
+          await this.backendClient.requestTimeout(run.runId).catch(() => {});
+        }
+        await this.dispatcher.enforceTimeout(run.runId, run.generation);
+      } catch (err) {
+        this.reportError(`enforceTimeout run ${run.runId}`, err);
       }
     }
   }

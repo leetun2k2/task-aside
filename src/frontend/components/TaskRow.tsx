@@ -19,6 +19,7 @@ export function TaskRow({ task, repository, isSelected, onSelect, onSelectParent
       role="button"
       tabIndex={0}
       data-task-id={task.id}
+      aria-selected={isSelected}
       className={`task-row ${isSelected ? 'task-row-selected' : ''}`}
       onClick={() => onSelect(task.id)}
       onKeyDown={(e) => {

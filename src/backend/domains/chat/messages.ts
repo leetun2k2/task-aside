@@ -4,7 +4,7 @@
 import type { Database, SQLQueryBindings } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { CreateMessageInput, Message, MessageSender } from '../../../contracts/chat.ts';
-import { DomainError } from '../../api/errors.ts';
+import { DomainError } from '../../errors.ts';
 import { eventHub } from '../../events/hub.ts';
 
 interface MessageRow {

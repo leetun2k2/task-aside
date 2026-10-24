@@ -136,7 +136,8 @@ export async function startServices(options: StartOptions = {}): Promise<Service
   const repoRoot = options.repoRoot ?? process.env.TASKASIDE_PAYLOAD_DIR ?? process.cwd();
   const healthTimeoutMs = options.healthTimeoutMs ?? DEFAULT_HEALTH_TIMEOUT_MS;
   const dataDir = getDataDir();
-  const bunExec = process.env.TASKASIDE_BUN_PATH || (typeof Bun !== 'undefined' ? process.execPath : 'bun');
+  const bunExec =
+    process.env.TASKASIDE_BUN_PATH || (typeof Bun !== 'undefined' ? process.execPath : 'bun');
 
   const handles: ServiceHandle[] = [];
   const serviceLocks = {} as SupervisorLock['services'];

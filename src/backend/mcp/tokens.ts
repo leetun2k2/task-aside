@@ -3,9 +3,9 @@
 import type { Database } from 'bun:sqlite';
 import { randomBytes, randomUUID } from 'node:crypto';
 import type { McpToolName } from '../../contracts/mcp.ts';
-import { DomainError } from '../api/errors.ts';
 import type { RunRow } from '../domains/task/runs.ts';
 import { type TaskRecord, getTaskById } from '../domains/task/tasks.ts';
+import { DomainError } from '../errors.ts';
 
 export type McpRole = 'mcp-managed' | 'mcp-external';
 

@@ -3,7 +3,7 @@ import type { Database } from 'bun:sqlite';
 import type { Hono } from 'hono';
 import { z } from 'zod';
 import type { McpToolName } from '../../contracts/mcp.ts';
-import { DomainError } from '../api/errors.ts';
+import { DomainError } from '../errors.ts';
 import {
   approvePairing,
   createPairingCode,

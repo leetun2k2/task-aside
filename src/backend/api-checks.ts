@@ -458,7 +458,11 @@ async function main(): Promise<void> {
             continue;
           }
           const content = readFileSync(fullPath, 'utf8');
-          if (content.includes('bun:sqlite')) {
+          const isImport =
+            /(?:from\s+['"]bun:sqlite['"]|import\(['"]bun:sqlite['"]\)|require\(['"]bun:sqlite['"]\))/.test(
+              content,
+            );
+          if (isImport) {
             offenders.push(relative(projectRoot, fullPath));
           }
         }

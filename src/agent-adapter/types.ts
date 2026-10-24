@@ -1,4 +1,5 @@
 import type { EventEnvelope, Provider, RunStatus, VerificationMethod } from '../contracts/index.ts';
+import type { RunEventStream } from './event-stream.ts';
 
 export type FakeScenario =
   'success' | 'failure' | 'hitl' | 'duplicate_events' | 'disconnect' | 'crash';
@@ -28,4 +29,5 @@ export interface AdapterRun {
   logPath: string;
   deadlineAt?: string;
   deadlineTimer?: ReturnType<typeof setTimeout>;
+  stream?: RunEventStream;
 }

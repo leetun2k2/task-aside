@@ -3,8 +3,8 @@
 import type { Database } from 'bun:sqlite';
 import { randomUUID } from 'node:crypto';
 import type { CreateRepositoryInput, Provider, Repository } from '../../../contracts/task.ts';
-import { DomainError } from '../../api/errors.ts';
 import { canonicalizePath } from '../../canonical-path.ts';
+import { DomainError } from '../../errors.ts';
 
 interface RepositoryRow {
   id: string;

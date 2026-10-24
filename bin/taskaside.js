@@ -128,7 +128,9 @@ function resolveCliEntrypoint(payloadDir) {
       return candidate;
     }
   }
-  throw new Error(`could not resolve CLI entrypoint in payload (${payloadDir}) or package (${PACKAGE_ROOT})`);
+  throw new Error(
+    `could not resolve CLI entrypoint in payload (${payloadDir}) or package (${PACKAGE_ROOT})`,
+  );
 }
 
 function main() {

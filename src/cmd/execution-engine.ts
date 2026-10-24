@@ -21,13 +21,7 @@ const internalToken = process.env.TASKASIDE_INTERNAL_TOKEN ?? '';
 // path (see EngineRuntimeOptions.defaultScenario doc comment). Unset in
 // normal operation.
 const fakeScenario = process.env.TASKASIDE_ENGINE_FAKE_SCENARIO as
-  | 'success'
-  | 'failure'
-  | 'hitl'
-  | 'duplicate_events'
-  | 'disconnect'
-  | 'crash'
-  | undefined;
+  'success' | 'failure' | 'hitl' | 'duplicate_events' | 'disconnect' | 'crash' | undefined;
 
 const app = createServiceApp('execution-engine', port);
 

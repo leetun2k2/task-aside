@@ -6,7 +6,7 @@ interface AvatarMenuProps {
   userInitials?: string;
 }
 
-export function AvatarMenu({ onOpenSettings, userInitials = 'N' }: AvatarMenuProps) {
+export function AvatarMenu({ onOpenSettings, userInitials = 'U' }: AvatarMenuProps) {
   const [isOpen, setIsOpen] = useState(false);
   const menuRef = useRef<HTMLDivElement>(null);
 

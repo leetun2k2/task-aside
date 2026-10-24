@@ -6,7 +6,7 @@
 import { execFileSync } from 'node:child_process';
 import { existsSync, realpathSync, rmSync, statSync, writeFileSync } from 'node:fs';
 import { join, normalize } from 'node:path';
-import { DomainError } from './api/errors.ts';
+import { DomainError } from './errors.ts';
 
 function resolveRealPath(displayPath: string): string {
   try {

@@ -93,8 +93,14 @@ await check('macos: auth tokens created with strict 0600 user-only permissions',
     // Mask with 0o777 to check file permissions
     const authMode = authStat.mode & 0o777;
     const internalMode = internalStat.mode & 0o777;
-    assert(authMode === 0o600, `auth.token must have 0600 permissions (got ${authMode.toString(8)})`);
-    assert(internalMode === 0o600, `internal.token must have 0600 permissions (got ${internalMode.toString(8)})`);
+    assert(
+      authMode === 0o600,
+      `auth.token must have 0600 permissions (got ${authMode.toString(8)})`,
+    );
+    assert(
+      internalMode === 0o600,
+      `internal.token must have 0600 permissions (got ${internalMode.toString(8)})`,
+    );
 
     spawnSync('node', [resolve(import.meta.dir, '../../bin/taskaside.js'), 'stop'], {
       env: {
@@ -119,20 +125,25 @@ await check('macos: Codex and Claude CLI drivers installed and verified', () => 
 });
 
 // 6. Cross-OS Support Matrix Declaration
-await check('matrix: Linux and Windows acceptance matrix recorded as deferred release gates', () => {
-  const matrix = {
-    darwin_arm64: 'VERIFIED_PASSED',
-    darwin_x64: 'VERIFIED_COMPATIBLE',
-    linux_x64: 'DEFERRED_RELEASE_GATE (T31 cross-OS testing required before public release)',
-    linux_arm64: 'DEFERRED_RELEASE_GATE',
-    windows_x64: 'DEFERRED_RELEASE_GATE',
-  };
-  assert(matrix.darwin_arm64 === 'VERIFIED_PASSED', 'macOS arm64 must be verified passed');
-});
+await check(
+  'matrix: Linux and Windows acceptance matrix recorded as deferred release gates',
+  () => {
+    const matrix = {
+      darwin_arm64: 'VERIFIED_PASSED',
+      darwin_x64: 'VERIFIED_COMPATIBLE',
+      linux_x64: 'DEFERRED_RELEASE_GATE (T31 cross-OS testing required before public release)',
+      linux_arm64: 'DEFERRED_RELEASE_GATE',
+      windows_x64: 'DEFERRED_RELEASE_GATE',
+    };
+    assert(matrix.darwin_arm64 === 'VERIFIED_PASSED', 'macOS arm64 must be verified passed');
+  },
+);
 
 // Summary
 const failed = results.filter((r) => !r.passed);
-console.log(`\nCross-OS Acceptance Results: ${results.length - failed.length}/${results.length} checks passed`);
+console.log(
+  `\nCross-OS Acceptance Results: ${results.length - failed.length}/${results.length} checks passed`,
+);
 if (failed.length > 0) {
   console.error('Failed checks:', failed);
   process.exit(1);

@@ -9,7 +9,7 @@ import type {
   TaskStatus,
   UpdateTaskInput,
 } from '../../../contracts/task.ts';
-import { DomainError } from '../../api/errors.ts';
+import { DomainError } from '../../errors.ts';
 import { eventHub } from '../../events/hub.ts';
 import { getRepositoryById } from './repositories.ts';
 

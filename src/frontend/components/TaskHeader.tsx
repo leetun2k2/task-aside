@@ -1,6 +1,7 @@
 // Task header pane component (SPECIFICATION.md §2 T-02, PRD §3).
 import type { Repository, Task } from '../../contracts/task.ts';
-import { PriorityBadge, StatusBadge } from './TaskBadges.tsx';
+import { PriorityBadge, StatusBadge } from './ui/Badge.tsx';
+import { Button } from './ui/Button.tsx';
 
 interface TaskHeaderProps {
   task: Task;
@@ -28,7 +29,11 @@ export function TaskHeader({
   isActionLoading = false,
 }: TaskHeaderProps) {
   const repoName = repository ? repository.name : task.repoId;
-  const canCancel = task.status === 'todo' || task.status === 'hitl' || task.status === 'error';
+  const canCancel =
+    task.status === 'todo' ||
+    task.status === 'processing' ||
+    task.status === 'hitl' ||
+    task.status === 'error';
   const canRetry = task.status === 'error';
   const canEdit = task.status !== 'processing';
 
@@ -37,19 +42,22 @@ export function TaskHeader({
       <div className="task-header-main">
         <div className="task-header-title-row">
           {onBack && (
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm btn-back-to-tasks"
+            <Button
+              variant="secondary"
+              size="sm"
+              className="btn-back-to-tasks"
               onClick={onBack}
               title="Back to tasks list"
               aria-label="Back to tasks list"
             >
               ← Tasks
-            </button>
+            </Button>
           )}
           <PriorityBadge priority={task.priority} />
           <span className="task-header-id">#{task.id}</span>
-          <h1 className="task-header-title">{task.title}</h1>
+          <h1 className="task-header-title" title={task.title}>
+            {task.title}
+          </h1>
         </div>
 
         <div className="task-header-actions-row">
@@ -57,46 +65,50 @@ export function TaskHeader({
 
           <div className="task-header-button-group">
             {canEdit && (
-              <button
-                type="button"
-                className="btn btn-secondary btn-sm"
+              <Button
+                variant="secondary"
+                size="sm"
                 onClick={onEdit}
                 disabled={isActionLoading}
                 title="Edit task title, description, or priority"
               >
                 Edit
-              </button>
+              </Button>
             )}
 
             {canRetry && (
-              <button
-                type="button"
-                className="btn btn-primary btn-sm btn-retry"
+              <Button
+                variant="primary"
+                size="sm"
+                className="btn-retry"
                 onClick={onRetry}
                 disabled={isActionLoading}
                 title="Retry failed task"
               >
                 Retry
-              </button>
+              </Button>
             )}
 
             {canCancel && (
-              <button
-                type="button"
-                className="btn btn-danger btn-sm"
+              <Button
+                variant="danger"
+                size="sm"
                 onClick={onCancel}
                 disabled={isActionLoading}
                 title="Cancel task"
               >
                 Cancel
-              </button>
+              </Button>
             )}
           </div>
         </div>
       </div>
 
       <div className="task-header-meta-row">
-        <span className="task-header-repo" title={repository?.canonicalPath ?? repoName}>
+        <span
+          className="task-header-repo"
+          title={repository?.canonicalPath ?? repository?.displayPath ?? repoName}
+        >
           <svg
             className="icon-repo"
             viewBox="0 0 16 16"

@@ -8,7 +8,9 @@ TaskAside is a planned **local-first task inbox and execution scheduler** for AI
 > [specs/2026-10-24-handoff-single-writer.md](specs/2026-10-24-handoff-single-writer.md) closed three
 > audited gaps — the engine now actually polls/dispatches/reconciles at startup, `yield_task` is
 > asynchronous intent rather than trusted stop proof, and external `create_task` requires an explicit
-> `repoId` + `idempotencyKey`. **Not yet true:** cross-machine or multi-process exclusivity (MCP cannot
+> `repoId` + `idempotencyKey`. The active refactor and modern stack upgrade is tracked in
+> [specs/2026-10-24-refactor-plan/00-overview.md](specs/2026-10-24-refactor-plan/00-overview.md).
+> **Not yet true:** cross-machine or multi-process exclusivity (MCP cannot
 > revoke a planner's or another tool's direct filesystem access to a checkout), untested Linux/Windows
 > support, and npm publishing. See "Planner handoff and current limits" below before relying on this for
 > multi-developer use. The CLI examples below describe the target user experience and are not a claim
@@ -140,12 +142,13 @@ blocker — it needs deployment and OS-level filesystem-isolation decisions that
 
 | Document | Purpose |
 |---|---|
-| [PRD.md](PRD.md) | User problem, MVP UX, scope and acceptance criteria |
-| [SPECIFICATION.md](SPECIFICATION.md) | Behavior, states, API/MCP/events and tests |
-| [CONSTITUTION.md](CONSTITUTION.md) | Non-negotiable engineering principles |
-| [ARCHITECTURE.md](ARCHITECTURE.md) | Services, ownership, persistence, streaming and security |
+| [PRD.md](specs/2026-10-18-initialize-project/PRD.md) | User problem, MVP UX, scope and acceptance criteria |
+| [SPECIFICATION.md](specs/2026-10-18-initialize-project/SPECIFICATION.md) | Behavior, states, API/MCP/events and tests |
+| [CONSTITUTION.md](specs/CONSTITUTION.md) | Non-negotiable engineering principles |
+| [ARCHITECTURE.md](specs/ARCHITECTURE.md) | Services, ownership, persistence, streaming and security |
 | [AGENTS.md](AGENTS.md) | Repository instructions for Codex/Claude contributors |
-| [PLAN.MD](PLAN.MD) | Milestones, POCs, dependencies and release checklist |
+| [PLAN.MD](specs/2026-10-18-initialize-project/PLAN.MD) | Historical milestones, POCs, dependencies and release checklist |
+| [Refactor Plan](specs/2026-10-24-refactor-plan/00-overview.md) | Active R0–R7 refactor plan, execution tracker, and task cards |
 
 ## Getting started as a contributor
 
@@ -154,9 +157,9 @@ formatting without changing files with `bun run format:check`. Prettier handles 
 Biome handles linting with `bun run lint`. Documentation and generated files are excluded
 from formatting.
 
-At this stage the repository is **documentation-first**. The implementation scaffold, package scripts and running server will be introduced in the early milestones of [PLAN.MD](PLAN.MD). Do not copy/paste speculative `bun run dev` commands from third-party examples and assume they already work.
+The base services and frontend are implemented locally. Review [specs/2026-10-24-refactor-plan/00-overview.md](specs/2026-10-24-refactor-plan/00-overview.md) for the active refactor plan and quality improvements.
 
-For implementation agents: read [AGENTS.md](AGENTS.md) first, then respect [CONSTITUTION.md](CONSTITUTION.md) and [SPECIFICATION.md](SPECIFICATION.md). Implement the provider and process-lifecycle POCs before expanding the frontend.
+For implementation agents: read [AGENTS.md](AGENTS.md) first, then respect [CONSTITUTION.md](specs/CONSTITUTION.md) and [SPECIFICATION.md](specs/2026-10-18-initialize-project/SPECIFICATION.md). Keep service ownership, atomic claims, fencing, idempotency, and verified-stop invariants intact.
 
 ## Licensing and contribution status
 

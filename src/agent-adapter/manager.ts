@@ -12,7 +12,7 @@ import type {
 import { getLogsDir } from '../supervisor/paths.ts';
 import { ClaudeDriver } from './drivers/claude.ts';
 import { CodexDriver } from './drivers/codex.ts';
-import type { AgentDriver } from './drivers/types.ts';
+import type { AgentDriver, DriverCallbacks } from './drivers/types.ts';
 import {
   AdapterError,
   NotFoundError,
@@ -20,10 +20,9 @@ import {
   StaleGenerationError,
   ValidationError,
 } from './errors.ts';
+import { MAX_EVENT_BUFFER, RunEventStream } from './event-stream.ts';
 import { DEFAULT_MAX_LOG_SIZE_BYTES, formatRunLogLine, writeRunLog } from './logging.ts';
 import type { AdapterRun, FakeScenario } from './types.ts';
-
-const MAX_EVENT_BUFFER = 1000;
 
 export class AdapterRunManager {
   private runs = new Map<string, AdapterRun>();
@@ -98,6 +97,7 @@ export class AdapterRunManager {
 
     const scenario = options?.scenario;
 
+    const stream = new RunEventStream(req.runId, MAX_EVENT_BUFFER);
     const run: AdapterRun = {
       runId: req.runId,
       taskId: req.taskId,
@@ -110,24 +110,28 @@ export class AdapterRunManager {
       mcp: req.mcp,
       scenario,
       status: 'running',
-      events: [],
+      events: stream.bufferRef,
       lastSequence: 0,
       pendingRequestId: null,
       verifiedStoppedAt: null,
       verificationMethod: null,
       exitCode: null,
       createdAt: new Date().toISOString(),
-      subscribers: new Set(),
-      onEndSubscribers: new Set(),
+      subscribers: stream.subscribers,
+      onEndSubscribers: stream.onEndSubscribers,
       logPath,
       deadlineAt: req.deadlineAt,
+      stream,
     };
 
     if (req.deadlineAt) {
       const ms = new Date(req.deadlineAt).getTime() - Date.now();
-      run.deadlineTimer = setTimeout(() => {
-        this.handleDeadlineTimeout(run);
-      }, Math.max(0, ms));
+      run.deadlineTimer = setTimeout(
+        () => {
+          this.handleDeadlineTimeout(run);
+        },
+        Math.max(0, ms),
+      );
     }
 
     this.runs.set(req.runId, run);
@@ -138,61 +142,61 @@ export class AdapterRunManager {
       const driver = this.drivers.get(req.provider);
       if (driver) {
         Promise.resolve()
-          .then(() =>
-            driver.start(run, {
-              onEvent: (event: EventEnvelope) => this.emitEvent(run, event),
-              onEnd: () => {
-                this.clearDeadlineTimer(run);
-                if (run.status === 'running') {
-                  run.status = 'done';
-                  run.verifiedStoppedAt = new Date().toISOString();
-                  run.verificationMethod = 'process_group_empty';
-                  run.exitCode = 0;
-                }
-                for (const onEnd of run.onEndSubscribers) {
-                  try {
-                    onEnd();
-                  } catch {
-                    // ignore
-                  }
-                }
-              },
-              onSessionId: (sid: string) => {
-                run.sessionId = sid;
-              },
-            }),
-          )
-          .catch((err: unknown) => {
-            this.clearDeadlineTimer(run);
-            run.status = 'error';
-            run.verifiedStoppedAt = new Date().toISOString();
-            run.verificationMethod = 'process_group_empty';
-            run.exitCode = 1;
-            const seq = run.lastSequence + 1;
-            this.emitEvent(run, {
-              runId: run.runId,
-              sequence: seq,
-              type: 'failed',
-              timestamp: new Date().toISOString(),
-              data: {
-                errorCode: 'AGENT_ERROR',
-                message: err instanceof Error ? err.message : String(err),
-              },
-            });
-            for (const onEnd of run.onEndSubscribers) {
-              try {
-                onEnd();
-              } catch {
-                // ignore
-              }
-            }
-          });
+          .then(() => driver.start(run, this.bindDriverCallbacks(run)))
+          .catch((err: unknown) => this.handleDriverError(run, err));
       } else {
         this.executeScenario(run, 'success');
       }
     }
 
     return { runId: req.runId, started: true };
+  }
+
+  private handleDriverEvent(run: AdapterRun, event: EventEnvelope): void {
+    this.emitEvent(run, event);
+  }
+
+  private handleDriverEnd(run: AdapterRun): void {
+    this.clearDeadlineTimer(run);
+    if (run.status === 'running') {
+      run.status = 'done';
+      run.verifiedStoppedAt = new Date().toISOString();
+      run.verificationMethod = 'process_group_empty';
+      run.exitCode = 0;
+    }
+    this.notifyRunEnded(run);
+  }
+
+  private handleDriverError(run: AdapterRun, err: unknown): void {
+    this.clearDeadlineTimer(run);
+    run.status = 'error';
+    run.verifiedStoppedAt = new Date().toISOString();
+    run.verificationMethod = 'process_group_empty';
+    run.exitCode = 1;
+    const seq = run.lastSequence + 1;
+    this.emitEvent(run, {
+      runId: run.runId,
+      sequence: seq,
+      type: 'failed',
+      timestamp: new Date().toISOString(),
+      data: {
+        errorCode: 'AGENT_ERROR',
+        message: err instanceof Error ? err.message : String(err),
+      },
+    });
+    this.notifyRunEnded(run);
+  }
+
+  private handleDriverSessionId(run: AdapterRun, sid: string): void {
+    run.sessionId = sid;
+  }
+
+  private bindDriverCallbacks(run: AdapterRun): DriverCallbacks {
+    return {
+      onEvent: (event: EventEnvelope) => this.handleDriverEvent(run, event),
+      onEnd: () => this.handleDriverEnd(run),
+      onSessionId: (sid: string) => this.handleDriverSessionId(run, sid),
+    };
   }
 
   getRun(runId: string): AdapterRun | undefined {
@@ -227,21 +231,35 @@ export class AdapterRunManager {
       throw new NotFoundError(`Run ${runId} not found`);
     }
 
-    // Replay past events after specified sequence
-    for (const event of run.events) {
-      if (event.sequence > after) {
-        onEvent(event);
+    const isTerminal =
+      run.status === 'done' || run.status === 'error' || run.status === 'cancelled';
+
+    let unsubscribe: () => void;
+    if (run.stream) {
+      unsubscribe = run.stream.subscribe({
+        after,
+        onEvent,
+        onEnd,
+        isTerminal,
+      });
+    } else {
+      // Replay past events after specified sequence
+      for (const event of run.events) {
+        if (event.sequence > after) {
+          onEvent(event);
+        }
       }
+      if (isTerminal) {
+        onEnd();
+        return () => {};
+      }
+      run.subscribers.add(onEvent);
+      run.onEndSubscribers.add(onEnd);
+      unsubscribe = () => {
+        run.subscribers.delete(onEvent);
+        run.onEndSubscribers.delete(onEnd);
+      };
     }
-
-    // If run has already reached a terminal state, signal end
-    if (run.status === 'done' || run.status === 'error' || run.status === 'cancelled') {
-      onEnd();
-      return () => {};
-    }
-
-    run.subscribers.add(onEvent);
-    run.onEndSubscribers.add(onEnd);
 
     if (run.scenario === 'disconnect') {
       setTimeout(() => {
@@ -249,10 +267,7 @@ export class AdapterRunManager {
       }, 15);
     }
 
-    return () => {
-      run.subscribers.delete(onEvent);
-      run.onEndSubscribers.delete(onEnd);
-    };
+    return unsubscribe;
   }
 
   provideInput(runId: string, req: ProvideInputRequest): { ok: boolean } {
@@ -328,13 +343,7 @@ export class AdapterRunManager {
       run.verificationMethod = 'process_group_empty';
       run.exitCode = 0;
 
-      for (const onEnd of run.onEndSubscribers) {
-        try {
-          onEnd();
-        } catch {
-          // ignore
-        }
-      }
+      this.notifyRunEnded(run);
     }, 5);
 
     return { ok: true };
@@ -397,14 +406,7 @@ export class AdapterRunManager {
       data: {},
     };
     this.emitEvent(run, cancelledEvent);
-
-    for (const onEnd of run.onEndSubscribers) {
-      try {
-        onEnd();
-      } catch {
-        // ignore
-      }
-    }
+    this.notifyRunEnded(run);
 
     return {
       runId: run.runId,
@@ -414,11 +416,24 @@ export class AdapterRunManager {
   }
 
   emitEvent(run: AdapterRun, event: EventEnvelope): void {
-    if (run.events.length >= MAX_EVENT_BUFFER) {
-      run.events.shift();
+    if (run.stream) {
+      run.stream.publish(event);
+      run.lastSequence = run.stream.lastSequence;
+    } else {
+      if (run.events.length >= MAX_EVENT_BUFFER) {
+        run.events.shift();
+      }
+      run.events.push(event);
+      run.lastSequence = event.sequence;
+
+      for (const subscriber of [...run.subscribers]) {
+        try {
+          subscriber(event);
+        } catch {
+          // ignore
+        }
+      }
     }
-    run.events.push(event);
-    run.lastSequence = event.sequence;
 
     writeRunLog(
       run.logPath,
@@ -431,12 +446,18 @@ export class AdapterRunManager {
       }),
       this.maxLogSizeBytes,
     );
+  }
 
-    for (const subscriber of run.subscribers) {
-      try {
-        subscriber(event);
-      } catch {
-        // ignore
+  private notifyRunEnded(run: AdapterRun): void {
+    if (run.stream) {
+      run.stream.notifyEnd();
+    } else {
+      for (const onEnd of [...run.onEndSubscribers]) {
+        try {
+          onEnd();
+        } catch {
+          // ignore
+        }
       }
     }
   }
@@ -459,13 +480,7 @@ export class AdapterRunManager {
         });
 
         setTimeout(() => {
-          for (const onEnd of run.onEndSubscribers) {
-            try {
-              onEnd();
-            } catch {
-              // ignore
-            }
-          }
+          this.notifyRunEnded(run);
         }, 15);
       }, 5);
       return;
@@ -525,13 +540,7 @@ export class AdapterRunManager {
         run.verificationMethod = 'process_group_empty';
         run.exitCode = 1;
 
-        for (const onEnd of run.onEndSubscribers) {
-          try {
-            onEnd();
-          } catch {
-            // ignore
-          }
-        }
+        this.notifyRunEnded(run);
       }, 5);
       return;
     }
@@ -569,13 +578,7 @@ export class AdapterRunManager {
         run.verificationMethod = 'process_group_empty';
         run.exitCode = 0;
 
-        for (const onEnd of run.onEndSubscribers) {
-          try {
-            onEnd();
-          } catch {
-            // ignore
-          }
-        }
+        this.notifyRunEnded(run);
       }, 5);
       return;
     }
@@ -612,13 +615,7 @@ export class AdapterRunManager {
       run.verificationMethod = 'process_group_empty';
       run.exitCode = 0;
 
-      for (const onEnd of run.onEndSubscribers) {
-        try {
-          onEnd();
-        } catch {
-          // ignore
-        }
-      }
+      this.notifyRunEnded(run);
     }, 5);
   }
 
@@ -648,13 +645,7 @@ export class AdapterRunManager {
       },
     });
 
-    for (const onEnd of run.onEndSubscribers) {
-      try {
-        onEnd();
-      } catch {
-        // ignore
-      }
-    }
+    this.notifyRunEnded(run);
   }
 
   private clearDeadlineTimer(run: AdapterRun): void {

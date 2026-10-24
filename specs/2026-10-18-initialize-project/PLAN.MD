@@ -1,12 +1,12 @@
 # TaskAside — MVP Implementation Plan
 
-> **Status:** Approved sequence and release gates; implementation not yet started  
+> **Status:** Historical initial plan (completed initial build; superseded by [2026-10-24-refactor-plan](../2026-10-24-refactor-plan/00-overview.md))  
 > **Version:** 0.4 · **Date:** 2026-10-18  
 > **Depends on:** [PRD.md](PRD.md) · [SPECIFICATION.md](SPECIFICATION.md) · [CONSTITUTION.md](../CONSTITUTION.md) · [ARCHITECTURE.md](../ARCHITECTURE.md)
 
 ## Implementation handoff
 
-**Current checkout:** documentation only. No application scaffold, provider proof or acceptance check has been completed. The sequence below is planned; it does not mean the POC gates have passed.
+**Historical note:** The baseline implementation of services, persistence, CLI, and UI was completed following this initial plan. Audited single-writer gaps were addressed in [specs/2026-10-24-handoff-single-writer.md](../2026-10-24-handoff-single-writer.md) and [specs/2026-10-24-polling-worker-pool.md](../2026-10-24-polling-worker-pool.md). The active project roadmap is now the approved [2026-10-24-refactor-plan](../2026-10-24-refactor-plan/00-overview.md). Real-provider CLI integration and cross-OS gates remain unverified until live execution evidence is recorded.
 
 **Confirmed delivery decisions:** Develop and prove M0–M5 on macOS first. Linux/Windows evidence is required at T31/M6 before cross-OS release and does not block M1. Use the installed Codex and Claude CLIs with their existing local login/configuration for POCs; no separate API setup is planned. Follow `z-agent-non-interactive` for harness mechanics. Authentication and provider behavior remain unverified until live POCs run.
 

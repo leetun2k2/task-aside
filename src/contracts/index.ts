@@ -8,3 +8,4 @@ export * from './errors.ts';
 export * from './canonical-json.ts';
 export * from './settings.ts';
 export * from './pool.ts';
+export * from './browser-events.ts';

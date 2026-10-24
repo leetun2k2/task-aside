@@ -3,6 +3,9 @@ import { useEffect, useState } from 'react';
 import type { Diagnostics, SettingsResponse } from '../../contracts/settings.ts';
 import type { Provider, Repository } from '../../contracts/task.ts';
 import { fetchSettings, updateSettings } from '../api.ts';
+import { type Theme, useTheme } from '../theme.ts';
+import { Button } from './ui/Button.tsx';
+import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/Dialog.tsx';
 
 interface SettingsModalProps {
   isOpen: boolean;
@@ -43,6 +46,9 @@ export function SettingsModal({
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
   const [settingsError, setSettingsError] = useState<string | null>(null);
+
+  // Theme state
+  const { theme, setTheme } = useTheme();
 
   // Load settings on modal open
   useEffect(() => {
@@ -134,23 +140,14 @@ export function SettingsModal({
   const diagnostics: Diagnostics | null = settings?.diagnostics ?? null;
 
   return (
-    // biome-ignore lint/a11y/useKeyWithClickEvents: backdrop click closes modal
-    <div className="modal-backdrop" onClick={onClose} role="presentation">
-      <dialog
-        open
-        className="modal-dialog modal-dialog-lg"
-        onClick={(e) => e.stopPropagation()}
-        onKeyDown={(e) => e.stopPropagation()}
-        aria-labelledby="settings-title"
-      >
-        <div className="modal-header">
-          <h2 id="settings-title" className="modal-title">
-            Settings & Diagnostics
-          </h2>
-          <button type="button" className="modal-close-btn" onClick={onClose} aria-label="Close">
+    <Dialog open={isOpen} onOpenChange={(open) => !open && onClose()}>
+      <DialogContent className="modal-dialog-lg">
+        <DialogHeader>
+          <DialogTitle id="settings-title">Settings & Diagnostics</DialogTitle>
+          <DialogClose className="modal-close-btn" aria-label="Close">
             ✕
-          </button>
-        </div>
+          </DialogClose>
+        </DialogHeader>
 
         <div className="modal-body settings-body">
           {/* Section 1: Execution Settings */}
@@ -165,11 +162,7 @@ export function SettingsModal({
                 {settingsError}
               </div>
             )}
-            {settingsMessage && (
-              <output className="form-success-banner">
-                {settingsMessage}
-              </output>
-            )}
+            {settingsMessage && <output className="form-success-banner">{settingsMessage}</output>}
 
             {isLoadingSettings ? (
               <div className="settings-loading">Loading settings...</div>
@@ -206,20 +199,56 @@ export function SettingsModal({
                       onChange={(e) => setConcurrency(Number(e.target.value))}
                       disabled={isSavingSettings}
                     />
+                    <small
+                      className="form-help-text"
+                      style={{
+                        fontSize: '11px',
+                        color: 'var(--color-text-muted, #64748b)',
+                        marginTop: '4px',
+                        display: 'block',
+                      }}
+                    >
+                      Pool cap: active runs are bounded by the 8-slot worker pool.
+                    </small>
                   </div>
                 </div>
 
                 <div className="form-actions-inline">
-                  <button
+                  <Button
                     type="submit"
-                    className="btn btn-primary btn-sm"
+                    variant="primary"
+                    size="sm"
+                    isLoading={isSavingSettings}
                     disabled={isSavingSettings}
                   >
                     {isSavingSettings ? 'Saving...' : 'Save Execution Settings'}
-                  </button>
+                  </Button>
                 </div>
               </form>
             )}
+          </section>
+
+          {/* Section: Appearance & Theme */}
+          <section className="settings-section">
+            <h3 className="settings-section-title">Appearance</h3>
+            <p className="settings-section-desc">
+              Choose your preferred color theme or match your operating system.
+            </p>
+            <div className="form-group" style={{ maxWidth: '240px' }}>
+              <label htmlFor="theme-select" className="form-label">
+                Color Theme
+              </label>
+              <select
+                id="theme-select"
+                className="form-select"
+                value={theme}
+                onChange={(e) => setTheme(e.target.value as Theme)}
+              >
+                <option value="system">System Default</option>
+                <option value="light">Light</option>
+                <option value="dark">Dark</option>
+              </select>
+            </div>
           </section>
 
           {/* Section 2: Registered Repositories */}
@@ -277,13 +306,15 @@ export function SettingsModal({
                     />
                   </div>
                 </div>
-                <button
+                <Button
                   type="submit"
-                  className="btn btn-secondary btn-sm"
+                  variant="secondary"
+                  size="sm"
+                  isLoading={isAddingRepo}
                   disabled={isAddingRepo || !newRepoName.trim() || !newRepoPath.trim()}
                 >
                   {isAddingRepo ? 'Registering...' : 'Register'}
-                </button>
+                </Button>
               </form>
             )}
           </section>
@@ -297,14 +328,15 @@ export function SettingsModal({
                   Internal runtime health and persistence state for local services.
                 </p>
               </div>
-              <button
+              <Button
                 type="button"
-                className="btn btn-secondary btn-xs"
+                variant="secondary"
+                size="sm"
                 onClick={handleRefreshDiagnostics}
                 title="Refresh diagnostics"
               >
                 ↻ Refresh
-              </button>
+              </Button>
             </div>
 
             {diagnostics ? (
@@ -345,11 +377,11 @@ export function SettingsModal({
         </div>
 
         <div className="modal-footer">
-          <button type="button" className="btn btn-secondary" onClick={onClose}>
+          <Button type="button" variant="secondary" onClick={onClose}>
             Close
-          </button>
+          </Button>
         </div>
-      </dialog>
-    </div>
+      </DialogContent>
+    </Dialog>
   );
 }

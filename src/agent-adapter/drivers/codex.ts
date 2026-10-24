@@ -8,6 +8,7 @@ import type {
 } from '../../contracts/index.ts';
 import { AdapterError } from '../errors.ts';
 import type { AdapterRun } from '../types.ts';
+import { terminateProcessGroup } from './process-group.ts';
 import type { AgentDriver, DriverCallbacks, DriverCancelResult } from './types.ts';
 
 export interface CodexRawEvent {
@@ -370,72 +371,13 @@ export class CodexDriver implements AgentDriver {
     }
 
     active.wasCancelled = true;
-    const pgid = active.pgid;
-
-    // Send SIGTERM to the process group
-    try {
-      process.kill(-pgid, 'SIGTERM');
-    } catch {
-      // Process or group already gone
-    }
-
-    // Wait up to 1000ms for clean termination
-    const graceMs = 1000;
-    const deadline = Date.now() + graceMs;
-    let groupEmpty = false;
-
-    while (Date.now() < deadline) {
-      try {
-        process.kill(-pgid, 0);
-        await Bun.sleep(50);
-      } catch (err: unknown) {
-        if (
-          err &&
-          typeof err === 'object' &&
-          'code' in err &&
-          (err as { code: string }).code === 'ESRCH'
-        ) {
-          groupEmpty = true;
-          break;
-        }
-      }
-    }
-
-    if (!groupEmpty) {
-      // Escalate to SIGKILL
-      try {
-        process.kill(-pgid, 'SIGKILL');
-      } catch {
-        // group already gone
-      }
-
-      const killDeadline = Date.now() + 500;
-      while (Date.now() < killDeadline) {
-        try {
-          process.kill(-pgid, 0);
-          await Bun.sleep(50);
-        } catch (err: unknown) {
-          if (
-            err &&
-            typeof err === 'object' &&
-            'code' in err &&
-            (err as { code: string }).code === 'ESRCH'
-          ) {
-            groupEmpty = true;
-            break;
-          }
-        }
-      }
-    }
+    const result = await terminateProcessGroup(active.pgid, 1000, 500);
 
     run.verifiedStoppedAt = new Date().toISOString();
-    run.verificationMethod = 'process_group_empty';
+    run.verificationMethod = result.verificationMethod;
     run.status = 'cancelled';
 
-    return {
-      verifiedStopped: true,
-      verificationMethod: 'process_group_empty',
-    };
+    return result;
   }
 
   async provideInput(_run: AdapterRun, _req: ProvideInputRequest): Promise<{ ok: boolean }> {

@@ -49,11 +49,7 @@ function assert(condition: boolean, message: string): void {
   }
 }
 
-async function runCheck(
-  id: string,
-  scenario: string,
-  fn: () => Promise<string>,
-): Promise<void> {
+async function runCheck(id: string, scenario: string, fn: () => Promise<string>): Promise<void> {
   const start = Date.now();
   try {
     const evidence = await fn();
@@ -121,7 +117,11 @@ async function waitFor<T>(
   throw new Error(`waitFor timed out after ${timeoutMs}ms`);
 }
 
-async function createRepo(backendPort: number, name: string, dir?: string): Promise<{ id: string; dir: string }> {
+async function createRepo(
+  backendPort: number,
+  name: string,
+  dir?: string,
+): Promise<{ id: string; dir: string }> {
   const repoDir = dir ?? mkdtempSync(join(tmpdir(), `taskaside-pool-${name}-`));
   const res = await req(backendPort, 'POST', '/api/repositories', {
     name,
@@ -200,12 +200,29 @@ async function main(): Promise<void> {
       const r2 = await createRepo(backend.port, 'repo2');
       const r3 = await createRepo(backend.port, 'repo3');
 
-      const token = await pairToken(backend.port, 'p1-client', ['create_task', 'list_tasks'], [r1.id, r2.id, r3.id]);
+      const token = await pairToken(
+        backend.port,
+        'p1-client',
+        ['create_task', 'list_tasks'],
+        [r1.id, r2.id, r3.id],
+      );
 
       const t0 = Date.now();
-      const c1 = await mcpCreate(backend.port, token, { repoId: r1.id, title: 'P1-Task-1', idempotencyKey: 'p1_k1' });
-      const c2 = await mcpCreate(backend.port, token, { repoId: r2.id, title: 'P1-Task-2', idempotencyKey: 'p1_k2' });
-      const c3 = await mcpCreate(backend.port, token, { repoId: r3.id, title: 'P1-Task-3', idempotencyKey: 'p1_k3' });
+      const c1 = await mcpCreate(backend.port, token, {
+        repoId: r1.id,
+        title: 'P1-Task-1',
+        idempotencyKey: 'p1_k1',
+      });
+      const c2 = await mcpCreate(backend.port, token, {
+        repoId: r2.id,
+        title: 'P1-Task-2',
+        idempotencyKey: 'p1_k2',
+      });
+      const c3 = await mcpCreate(backend.port, token, {
+        repoId: r3.id,
+        title: 'P1-Task-3',
+        idempotencyKey: 'p1_k3',
+      });
 
       assert(c1.status === 200 && c2.status === 200 && c3.status === 200, 'tasks created via MCP');
       const id1 = c1.body.taskId;
@@ -236,7 +253,11 @@ async function main(): Promise<void> {
           req(backend.port, 'GET', `/api/tasks/${id2}`),
           req(backend.port, 'GET', `/api/tasks/${id3}`),
         ]);
-        if (res1.body.status === 'done' && res2.body.status === 'done' && res3.body.status === 'done') {
+        if (
+          res1.body.status === 'done' &&
+          res2.body.status === 'done' &&
+          res3.body.status === 'done'
+        ) {
           return true;
         }
         return undefined;
@@ -275,7 +296,12 @@ async function main(): Promise<void> {
         repos.push(await createRepo(backend.port, `repo_p2_${i}`));
       }
 
-      const token = await pairToken(backend.port, 'p2-client', ['create_task'], repos.map((r) => r.id));
+      const token = await pairToken(
+        backend.port,
+        'p2-client',
+        ['create_task'],
+        repos.map((r) => r.id),
+      );
 
       const taskIds: string[] = [];
       for (let i = 1; i <= 9; i++) {
@@ -288,16 +314,21 @@ async function main(): Promise<void> {
       }
 
       // Wait until 8 tasks are admitted/hitl
-      await waitFor(async () => {
-        const tasksRes = await req(backend.port, 'GET', '/api/tasks');
-        if (tasksRes.status === 200 && Array.isArray(tasksRes.body)) {
-          const hitlTasks = (tasksRes.body as { status: string }[]).filter((t) => t.status === 'hitl');
-          if (hitlTasks.length === 8) {
-            return hitlTasks;
+      await waitFor(
+        async () => {
+          const tasksRes = await req(backend.port, 'GET', '/api/tasks');
+          if (tasksRes.status === 200 && Array.isArray(tasksRes.body)) {
+            const hitlTasks = (tasksRes.body as { status: string }[]).filter(
+              (t) => t.status === 'hitl',
+            );
+            if (hitlTasks.length === 8) {
+              return hitlTasks;
+            }
           }
-        }
-        return undefined;
-      }, { timeoutMs: 20_000 });
+          return undefined;
+        },
+        { timeoutMs: 20_000 },
+      );
 
       // Exactly 1 task out of 9 must strictly wait in 'todo' status (concurrency cap = 8)!
       const allTasksRes = await req(backend.port, 'GET', '/api/tasks');
@@ -315,7 +346,10 @@ async function main(): Promise<void> {
       const controlLatency = Date.now() - controlStart;
       assert(settingsRes.status === 200, `settings endpoint responsive: ${settingsRes.status}`);
       assert(healthRes.status === 200, 'health endpoint responsive');
-      assert(controlLatency < 200, `control operations responsive under load (${controlLatency}ms)`);
+      assert(
+        controlLatency < 200,
+        `control operations responsive under load (${controlLatency}ms)`,
+      );
 
       // Now cancel one hitl task to free up a slot
       const cancelRes = await req(backend.port, 'POST', `/api/tasks/${hitlTasks[0].id}/cancel`);
@@ -341,84 +375,102 @@ async function main(): Promise<void> {
 
   // P3: Many tasks share one absolute path, including symlink/case aliases
   // Real spawned services: measured writer intervals never overlap. Separate canonical folders may overlap.
-  await runCheck('P3', 'Many tasks share one absolute path, including symlink/case aliases', async () => {
-    const prevDataDir = process.env.TASKASIDE_DATA_DIR;
-    const prevScenario = process.env.TASKASIDE_ENGINE_FAKE_SCENARIO;
-    const testDataDir = mkdtempSync(join(tmpdir(), 'taskaside-p3-'));
-    process.env.TASKASIDE_DATA_DIR = testDataDir;
-    process.env.TASKASIDE_ENGINE_FAKE_SCENARIO = 'success';
+  await runCheck(
+    'P3',
+    'Many tasks share one absolute path, including symlink/case aliases',
+    async () => {
+      const prevDataDir = process.env.TASKASIDE_DATA_DIR;
+      const prevScenario = process.env.TASKASIDE_ENGINE_FAKE_SCENARIO;
+      const testDataDir = mkdtempSync(join(tmpdir(), 'taskaside-p3-'));
+      process.env.TASKASIDE_DATA_DIR = testDataDir;
+      process.env.TASKASIDE_ENGINE_FAKE_SCENARIO = 'success';
 
-    try {
-      const handles = await startServices();
-      const backend = handles.find((h) => h.name === 'backend');
-      if (!backend) throw new Error('backend handle missing');
+      try {
+        const handles = await startServices();
+        const backend = handles.find((h) => h.name === 'backend');
+        if (!backend) throw new Error('backend handle missing');
 
-      const targetDir = mkdtempSync(join(tmpdir(), 'taskaside-p3-target-'));
-      const symlinkDir = join(tmpdir(), `taskaside-p3-symlink-${Date.now()}`);
-      symlinkSync(targetDir, symlinkDir);
+        const targetDir = mkdtempSync(join(tmpdir(), 'taskaside-p3-target-'));
+        const symlinkDir = join(tmpdir(), `taskaside-p3-symlink-${Date.now()}`);
+        symlinkSync(targetDir, symlinkDir);
 
-      const rA = await createRepo(backend.port, 'repoA', targetDir);
-      const rB = await createRepo(backend.port, 'repoB');
+        const rA = await createRepo(backend.port, 'repoA', targetDir);
+        const rB = await createRepo(backend.port, 'repoB');
 
-      const token = await pairToken(backend.port, 'p3-client', ['create_task'], [rA.id, rB.id]);
+        const token = await pairToken(backend.port, 'p3-client', ['create_task'], [rA.id, rB.id]);
 
-      // Enqueue Task A1 on repoA, Task A2 on repoA (same tree), Task B1 on repoB
-      const resA1 = await mcpCreate(backend.port, token, { repoId: rA.id, title: 'Task A1', idempotencyKey: 'p3_a1' });
-      const resA2 = await mcpCreate(backend.port, token, { repoId: rA.id, title: 'Task A2', idempotencyKey: 'p3_a2' });
-      const resB1 = await mcpCreate(backend.port, token, { repoId: rB.id, title: 'Task B1', idempotencyKey: 'p3_b1' });
+        // Enqueue Task A1 on repoA, Task A2 on repoA (same tree), Task B1 on repoB
+        const resA1 = await mcpCreate(backend.port, token, {
+          repoId: rA.id,
+          title: 'Task A1',
+          idempotencyKey: 'p3_a1',
+        });
+        const resA2 = await mcpCreate(backend.port, token, {
+          repoId: rA.id,
+          title: 'Task A2',
+          idempotencyKey: 'p3_a2',
+        });
+        const resB1 = await mcpCreate(backend.port, token, {
+          repoId: rB.id,
+          title: 'Task B1',
+          idempotencyKey: 'p3_b1',
+        });
 
-      const idA1 = resA1.body.taskId;
-      const idA2 = resA2.body.taskId;
-      const idB1 = resB1.body.taskId;
+        const idA1 = resA1.body.taskId;
+        const idA2 = resA2.body.taskId;
+        const idB1 = resB1.body.taskId;
 
-      // Wait for all three tasks to reach terminal 'done'
-      await waitFor(async () => {
-        const [r1, r2, r3] = await Promise.all([
-          req(backend.port, 'GET', `/api/tasks/${idA1}`),
-          req(backend.port, 'GET', `/api/tasks/${idA2}`),
-          req(backend.port, 'GET', `/api/tasks/${idB1}`),
-        ]);
-        if (r1.body.status === 'done' && r2.body.status === 'done' && r3.body.status === 'done') {
-          return true;
-        }
-        return undefined;
-      });
+        // Wait for all three tasks to reach terminal 'done'
+        await waitFor(async () => {
+          const [r1, r2, r3] = await Promise.all([
+            req(backend.port, 'GET', `/api/tasks/${idA1}`),
+            req(backend.port, 'GET', `/api/tasks/${idA2}`),
+            req(backend.port, 'GET', `/api/tasks/${idB1}`),
+          ]);
+          if (r1.body.status === 'done' && r2.body.status === 'done' && r3.body.status === 'done') {
+            return true;
+          }
+          return undefined;
+        });
 
-      // Query exact run intervals persisted in backend SQLite
-      const dbPath = join(testDataDir, 'taskaside.db');
-      const verifyDb = openDatabase({ path: dbPath });
-      const dbRuns = verifyDb
-        .query('SELECT task_id, started_at, ended_at FROM runs')
-        .all() as { task_id: string; started_at: string; ended_at: string }[];
-      closeDatabase(verifyDb);
+        // Query exact run intervals persisted in backend SQLite
+        const dbPath = join(testDataDir, 'taskaside.db');
+        const verifyDb = openDatabase({ path: dbPath });
+        const dbRuns = verifyDb.query('SELECT task_id, started_at, ended_at FROM runs').all() as {
+          task_id: string;
+          started_at: string;
+          ended_at: string;
+        }[];
+        closeDatabase(verifyDb);
 
-      const runA1 = dbRuns.find((r) => r.task_id === idA1);
-      const runA2 = dbRuns.find((r) => r.task_id === idA2);
-      const runB1 = dbRuns.find((r) => r.task_id === idB1);
-      assert(Boolean(runA1 && runA2 && runB1), 'all runs recorded in database');
-      if (!runA1 || !runA2 || !runB1) throw new Error('missing run records');
+        const runA1 = dbRuns.find((r) => r.task_id === idA1);
+        const runA2 = dbRuns.find((r) => r.task_id === idA2);
+        const runB1 = dbRuns.find((r) => r.task_id === idB1);
+        assert(Boolean(runA1 && runA2 && runB1), 'all runs recorded in database');
+        if (!runA1 || !runA2 || !runB1) throw new Error('missing run records');
 
-      const a1Start = new Date(runA1.started_at).getTime();
-      const a1End = new Date(runA1.ended_at).getTime();
-      const a2Start = new Date(runA2.started_at).getTime();
-      const a2End = new Date(runA2.ended_at).getTime();
-      const b1Start = new Date(runB1.started_at).getTime();
-      const b1End = new Date(runB1.ended_at).getTime();
+        const a1Start = new Date(runA1.started_at).getTime();
+        const a1End = new Date(runA1.ended_at).getTime();
+        const a2Start = new Date(runA2.started_at).getTime();
+        const a2End = new Date(runA2.ended_at).getTime();
+        const b1Start = new Date(runB1.started_at).getTime();
+        const b1End = new Date(runB1.ended_at).getTime();
 
-      // Serial execution: A2 started strictly at or after A1 ended (canonical path lock exclusivity)
-      assert(
-        a2Start >= a1End,
-        `Task A1 and A2 intervals overlapped! A1: [${a1Start}..${a1End}], A2: [${a2Start}..${a2End}]`,
-      );
+        // Serial execution: A2 started strictly at or after A1 ended (canonical path lock exclusivity)
+        assert(
+          a2Start >= a1End,
+          `Task A1 and A2 intervals overlapped! A1: [${a1Start}..${a1End}], A2: [${a2Start}..${a2End}]`,
+        );
 
-      return `alias canonicalization serialized A1 and A2 (A1 [${a1Start}..${a1End}], A2 [${a2Start}..${a2End}] overlap = 0ms); B1 executed independently on distinct tree ([${b1Start}..${b1End}])`;
-    } finally {
-      await stopServices().catch(() => {});
-      process.env.TASKASIDE_DATA_DIR = prevDataDir;
-      process.env.TASKASIDE_ENGINE_FAKE_SCENARIO = prevScenario;
-      rmSync(testDataDir, { recursive: true, force: true });
-    }
-  });
+        return `alias canonicalization serialized A1 and A2 (A1 [${a1Start}..${a1End}], A2 [${a2Start}..${a2End}] overlap = 0ms); B1 executed independently on distinct tree ([${b1Start}..${b1End}])`;
+      } finally {
+        await stopServices().catch(() => {});
+        process.env.TASKASIDE_DATA_DIR = prevDataDir;
+        process.env.TASKASIDE_ENGINE_FAKE_SCENARIO = prevScenario;
+        rmSync(testDataDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   // P4: Several engine processes/backend connections contend
   // One owner per task/path; total reservations never exceed 8. Direct claim routes also guarded.
@@ -431,7 +483,9 @@ async function main(): Promise<void> {
       const repos = [];
       for (let i = 1; i <= 12; i++) {
         const d = createRepoDir(tempDir, `repo_${i}`);
-        repos.push(createRepository(db, { name: `r${i}`, displayPath: d, defaultProvider: 'codex' }));
+        repos.push(
+          createRepository(db, { name: `r${i}`, displayPath: d, defaultProvider: 'codex' }),
+        );
       }
 
       const tasks = [];
@@ -475,7 +529,8 @@ async function main(): Promise<void> {
       } catch (err: unknown) {
         if (
           err instanceof Error &&
-          (err.message.includes('at capacity') || (err as { code?: string }).code === 'CAPACITY_EXCEEDED')
+          (err.message.includes('at capacity') ||
+            (err as { code?: string }).code === 'CAPACITY_EXCEEDED')
         ) {
           directClaimExceeded = true;
         }
@@ -497,27 +552,54 @@ async function main(): Promise<void> {
     runMigrations(db);
 
     try {
-      const repoA = createRepository(db, { name: 'repoA', displayPath: createRepoDir(tempDir, 'rA'), defaultProvider: 'codex' });
-      const repoB = createRepository(db, { name: 'repoB', displayPath: createRepoDir(tempDir, 'rB'), defaultProvider: 'codex' });
-      const repoC = createRepository(db, { name: 'repoC', displayPath: createRepoDir(tempDir, 'rC'), defaultProvider: 'codex' });
+      const repoA = createRepository(db, {
+        name: 'repoA',
+        displayPath: createRepoDir(tempDir, 'rA'),
+        defaultProvider: 'codex',
+      });
+      const repoB = createRepository(db, {
+        name: 'repoB',
+        displayPath: createRepoDir(tempDir, 'rB'),
+        defaultProvider: 'codex',
+      });
+      const repoC = createRepository(db, {
+        name: 'repoC',
+        displayPath: createRepoDir(tempDir, 'rC'),
+        defaultProvider: 'codex',
+      });
 
       // Task A1 running on Repo A
       const taskA1 = createTask(db, { repoId: repoA.id, title: 'A1 Running', priority: 'P2' });
       claimTask(db, taskA1.id, { ownerId: 'eng', generation: 0, idempotencyKey: 'c_a1' });
 
       // Enqueue high-priority P0 on busy Repo A
-      const taskA2 = createTask(db, { repoId: repoA.id, title: 'A2 High Priority', priority: 'P0' });
+      const taskA2 = createTask(db, {
+        repoId: repoA.id,
+        title: 'A2 High Priority',
+        priority: 'P0',
+      });
 
       // Enqueue P1 on idle Repo B and Repo C
-      const taskB1 = createTask(db, { repoId: repoB.id, title: 'B1 Normal Priority', priority: 'P1' });
-      const taskC1 = createTask(db, { repoId: repoC.id, title: 'C1 Normal Priority', priority: 'P1' });
+      const taskB1 = createTask(db, {
+        repoId: repoB.id,
+        title: 'B1 Normal Priority',
+        priority: 'P1',
+      });
+      const taskC1 = createTask(db, {
+        repoId: repoC.id,
+        title: 'C1 Normal Priority',
+        priority: 'P1',
+      });
 
       // Next eligible admission must skip busy repo A and pick either idle repo B or C
       const admit1 = admitNextEligibleTask(db, { ownerId: 'eng', idempotencyKey: 'k_admit1' });
       assert(admit1.admitted === true, 'admit 1 admitted');
       if (!admit1.admitted) throw new Error('not admitted');
       const admitted1Id = admit1.taskSnapshot.id;
-      assert(admitted1Id === taskB1.id || admitted1Id === taskC1.id, `expected task B1 or C1, got ${admitted1Id}`);
+      assert(
+        admitted1Id === taskB1.id || admitted1Id === taskC1.id,
+        `expected task B1 or C1, got ${admitted1Id}`,
+      );
       assert(admitted1Id !== taskA2.id, 'must NOT admit A2 while Repo A is occupied');
 
       // Next admission must pick the other idle task
@@ -525,7 +607,10 @@ async function main(): Promise<void> {
       assert(admit2.admitted === true, 'admit 2 admitted');
       if (!admit2.admitted) throw new Error('not admitted');
       const admitted2Id = admit2.taskSnapshot.id;
-      assert(admitted2Id === taskB1.id || admitted2Id === taskC1.id, `expected task B1 or C1, got ${admitted2Id}`);
+      assert(
+        admitted2Id === taskB1.id || admitted2Id === taskC1.id,
+        `expected task B1 or C1, got ${admitted2Id}`,
+      );
       assert(admitted2Id !== admitted1Id, 'must admit distinct tasks');
       assert(admitted2Id !== taskA2.id, 'must NOT admit A2 while Repo A is occupied');
 
@@ -547,7 +632,10 @@ async function main(): Promise<void> {
       const admit3 = admitNextEligibleTask(db, { ownerId: 'eng', idempotencyKey: 'k_admit3' });
       assert(admit3.admitted === true, 'admit 3 admitted');
       if (!admit3.admitted) throw new Error('not admitted');
-      assert(admit3.taskSnapshot.id === taskA2.id, `expected task A2, got ${admit3.taskSnapshot.id}`);
+      assert(
+        admit3.taskSnapshot.id === taskA2.id,
+        `expected task A2, got ${admit3.taskSnapshot.id}`,
+      );
 
       return 'non-stalling verified: B1 and C1 progressed while Repo A was occupied; non-preemption held; A2 admitted when tree freed';
     } finally {
@@ -567,7 +655,11 @@ async function main(): Promise<void> {
       const repos = [];
       const tasks = [];
       for (let i = 1; i <= 4; i++) {
-        const r = createRepository(db, { name: `r${i}`, displayPath: createRepoDir(tempDir, `p6_${i}`), defaultProvider: 'codex' });
+        const r = createRepository(db, {
+          name: `r${i}`,
+          displayPath: createRepoDir(tempDir, `p6_${i}`),
+          defaultProvider: 'codex',
+        });
         repos.push(r);
         tasks.push(createTask(db, { repoId: r.id, title: `P6 Task ${i}`, priority: 'P1' }));
       }
@@ -582,7 +674,9 @@ async function main(): Promise<void> {
       }
 
       // Set task 1 into HITL
-      db.query("UPDATE runs SET status = 'hitl', pending_input_request_id = 'req_123' WHERE id = ?").run(claims[0].runId);
+      db.query(
+        "UPDATE runs SET status = 'hitl', pending_input_request_id = 'req_123' WHERE id = ?",
+      ).run(claims[0].runId);
       db.query("UPDATE tasks SET status = 'hitl' WHERE id = ?").run(tasks[0].id);
 
       // Verify active runs still counts HITL (retains slot)
@@ -616,45 +710,56 @@ async function main(): Promise<void> {
 
   // P7: Crash between claim, start, event commit, and finalization; lost ACK
   // No duplicate task or harness. Durable receipts/reconciliation recover or quarantine
-  await runCheck('P7', 'Crash between claim, start, event commit, and finalization; lost ACK', async () => {
-    const tempDir = mkdtempSync(join(tmpdir(), 'taskaside-p7-'));
-    const db = openDatabase({ path: join(tempDir, 'test.db') });
-    runMigrations(db);
+  await runCheck(
+    'P7',
+    'Crash between claim, start, event commit, and finalization; lost ACK',
+    async () => {
+      const tempDir = mkdtempSync(join(tmpdir(), 'taskaside-p7-'));
+      const db = openDatabase({ path: join(tempDir, 'test.db') });
+      runMigrations(db);
 
-    try {
-      const repo = createRepository(db, { name: 'r_p7', displayPath: createRepoDir(tempDir, 'p7'), defaultProvider: 'codex' });
-      createTask(db, { repoId: repo.id, title: 'P7 Task', priority: 'P1' });
-
-      // First admission
-      const idempotencyKey = 'engine_p7_key_ack';
-      const admit1 = admitNextEligibleTask(db, { ownerId: 'eng_p7', idempotencyKey });
-      assert(admit1.admitted === true, 'initial admit succeeded');
-      if (!admit1.admitted) throw new Error('not admitted');
-
-      // Simulate lost ACK: engine retries with the SAME ownerId and idempotencyKey
-      const admitRetry = admitNextEligibleTask(db, { ownerId: 'eng_p7', idempotencyKey });
-      assert(admitRetry.admitted === true, 'retry admit succeeded');
-      if (!admitRetry.admitted) throw new Error('retry not admitted');
-      assert(admitRetry.runId === admit1.runId, 'returned EXACT same runId without creating second run');
-
-      // Reusing same idempotencyKey for DIFFERENT task conflicts
-      const task2 = createTask(db, { repoId: repo.id, title: 'P7 Task 2', priority: 'P1' });
-      let conflict = false;
       try {
-        claimTask(db, task2.id, { ownerId: 'eng_p7', generation: 0, idempotencyKey });
-      } catch (err: unknown) {
-        if (err instanceof Error && err.message.includes('conflicts')) {
-          conflict = true;
-        }
-      }
-      assert(conflict, 'reusing idempotency key for different task conflicts');
+        const repo = createRepository(db, {
+          name: 'r_p7',
+          displayPath: createRepoDir(tempDir, 'p7'),
+          defaultProvider: 'codex',
+        });
+        createTask(db, { repoId: repo.id, title: 'P7 Task', priority: 'P1' });
 
-      return 'durable receipts verified: exact receipt returned across retries; conflicting reuse rejected; 0 duplicate runs';
-    } finally {
-      closeDatabase(db);
-      rmSync(tempDir, { recursive: true, force: true });
-    }
-  });
+        // First admission
+        const idempotencyKey = 'engine_p7_key_ack';
+        const admit1 = admitNextEligibleTask(db, { ownerId: 'eng_p7', idempotencyKey });
+        assert(admit1.admitted === true, 'initial admit succeeded');
+        if (!admit1.admitted) throw new Error('not admitted');
+
+        // Simulate lost ACK: engine retries with the SAME ownerId and idempotencyKey
+        const admitRetry = admitNextEligibleTask(db, { ownerId: 'eng_p7', idempotencyKey });
+        assert(admitRetry.admitted === true, 'retry admit succeeded');
+        if (!admitRetry.admitted) throw new Error('retry not admitted');
+        assert(
+          admitRetry.runId === admit1.runId,
+          'returned EXACT same runId without creating second run',
+        );
+
+        // Reusing same idempotencyKey for DIFFERENT task conflicts
+        const task2 = createTask(db, { repoId: repo.id, title: 'P7 Task 2', priority: 'P1' });
+        let conflict = false;
+        try {
+          claimTask(db, task2.id, { ownerId: 'eng_p7', generation: 0, idempotencyKey });
+        } catch (err: unknown) {
+          if (err instanceof Error && err.message.includes('conflicts')) {
+            conflict = true;
+          }
+        }
+        assert(conflict, 'reusing idempotency key for different task conflicts');
+
+        return 'durable receipts verified: exact receipt returned across retries; conflicting reuse rejected; 0 duplicate runs';
+      } finally {
+        closeDatabase(db);
+        rmSync(tempDir, { recursive: true, force: true });
+      }
+    },
+  );
 
   // P8: Deadline expiry and restart
   // Persisted 60-minute deadline is enforced without reset, including HITL.
@@ -665,31 +770,45 @@ async function main(): Promise<void> {
     runMigrations(db);
 
     try {
-      const repo = createRepository(db, { name: 'r_p8', displayPath: createRepoDir(tempDir, 'p8'), defaultProvider: 'codex' });
+      const repo = createRepository(db, {
+        name: 'r_p8',
+        displayPath: createRepoDir(tempDir, 'p8'),
+        defaultProvider: 'codex',
+      });
       const task = createTask(db, { repoId: repo.id, title: 'P8 Task', priority: 'P1' });
 
-      const claim = claimTask(db, task.id, { ownerId: 'eng_p8', generation: 0, idempotencyKey: 'p8_claim' });
+      const claim = claimTask(db, task.id, {
+        ownerId: 'eng_p8',
+        generation: 0,
+        idempotencyKey: 'p8_claim',
+      });
       const run = getRunById(db, claim.runId);
       if (!run) throw new Error('run missing');
 
       // Verify 60-minute deadline
       const deadline = new Date(run.deadline_at ?? '').getTime();
       const started = new Date(run.started_at).getTime();
-      assert(deadline - started >= TASK_TIMEOUT_MS - 1000, 'persisted deadline is 60 minutes from start');
+      assert(
+        deadline - started >= TASK_TIMEOUT_MS - 1000,
+        'persisted deadline is 60 minutes from start',
+      );
 
       // Test adapter-side independent deadline timer
       const manager = new AdapterRunManager();
       const pastDeadline = new Date(Date.now() + 50).toISOString();
-      manager.startRun({
-        runId: 'adapter_timeout_run',
-        taskId: task.id,
-        provider: 'codex',
-        cwd: join(tempDir, 'p8'),
-        instruction: 'test',
-        ownerId: 'eng_p8',
-        generation: 1,
-        deadlineAt: pastDeadline,
-      }, { scenario: 'disconnect' });
+      manager.startRun(
+        {
+          runId: 'adapter_timeout_run',
+          taskId: task.id,
+          provider: 'codex',
+          cwd: join(tempDir, 'p8'),
+          instruction: 'test',
+          ownerId: 'eng_p8',
+          generation: 1,
+          deadlineAt: pastDeadline,
+        },
+        { scenario: 'disconnect' },
+      );
 
       // Wait for adapter-side timer to self-trigger timeout error
       await waitFor(async () => {
@@ -715,10 +834,18 @@ async function main(): Promise<void> {
     runMigrations(db);
 
     try {
-      const repo = createRepository(db, { name: 'r_p9', displayPath: createRepoDir(tempDir, 'p9'), defaultProvider: 'codex' });
+      const repo = createRepository(db, {
+        name: 'r_p9',
+        displayPath: createRepoDir(tempDir, 'p9'),
+        defaultProvider: 'codex',
+      });
       const task1 = createTask(db, { repoId: repo.id, title: 'P9 Task 1', priority: 'P1' });
 
-      const claim = claimTask(db, task1.id, { ownerId: 'eng_p9', generation: 0, idempotencyKey: 'p9_claim' });
+      const claim = claimTask(db, task1.id, {
+        ownerId: 'eng_p9',
+        generation: 0,
+        idempotencyKey: 'p9_claim',
+      });
 
       // Request timeout
       requestTimeout(db, claim.runId);
@@ -756,10 +883,18 @@ async function main(): Promise<void> {
     runMigrations(db);
 
     try {
-      const repo = createRepository(db, { name: 'r_p10', displayPath: createRepoDir(tempDir, 'p10'), defaultProvider: 'codex' });
+      const repo = createRepository(db, {
+        name: 'r_p10',
+        displayPath: createRepoDir(tempDir, 'p10'),
+        defaultProvider: 'codex',
+      });
       const task = createTask(db, { repoId: repo.id, title: 'P10 Task', priority: 'P1' });
 
-      const claim = claimTask(db, task.id, { ownerId: 'eng_p10', generation: 0, idempotencyKey: 'p10_claim' });
+      const claim = claimTask(db, task.id, {
+        ownerId: 'eng_p10',
+        generation: 0,
+        idempotencyKey: 'p10_claim',
+      });
 
       // Finalize with status 'done'
       const fin1 = finalizeRun(db, claim.runId, {
@@ -813,7 +948,11 @@ async function main(): Promise<void> {
       const r = await createRepo(backend.port, 'repo_p11');
       const token = await pairToken(backend.port, 'p11-client', ['create_task'], [r.id]);
 
-      const c1 = await mcpCreate(backend.port, token, { repoId: r.id, title: 'Task P11', idempotencyKey: 'p11_1' });
+      const c1 = await mcpCreate(backend.port, token, {
+        repoId: r.id,
+        title: 'Task P11',
+        idempotencyKey: 'p11_1',
+      });
       assert(c1.status === 200, 'task created');
 
       // Wait for task to be admitted into hitl
@@ -829,14 +968,17 @@ async function main(): Promise<void> {
       process.kill(-engine.pid, 'SIGTERM');
 
       // Verify engine process terminates within bounded shutdown grace
-      await waitFor(async () => {
-        try {
-          process.kill(engine.pid, 0);
-          return undefined; // still alive
-        } catch {
-          return true; // exited
-        }
-      }, { timeoutMs: 10_000 });
+      await waitFor(
+        async () => {
+          try {
+            process.kill(engine.pid, 0);
+            return undefined; // still alive
+          } catch {
+            return true; // exited
+          }
+        },
+        { timeoutMs: 10_000 },
+      );
 
       // Run status remains safe in backend
       const tAfter = await req(backend.port, 'GET', `/api/tasks/${c1.body.taskId}`);
@@ -892,24 +1034,35 @@ async function main(): Promise<void> {
 
     try {
       // Test limit 3
-      db.query("UPDATE settings SET max_concurrency = 3 WHERE id = 1").run();
+      db.query('UPDATE settings SET max_concurrency = 3 WHERE id = 1').run();
       assert(getEffectiveMaxConcurrency(db) === 3, 'effective concurrency for 3 is 3');
 
       // Test limit 8
-      db.query("UPDATE settings SET max_concurrency = 8 WHERE id = 1").run();
+      db.query('UPDATE settings SET max_concurrency = 8 WHERE id = 1').run();
       assert(getEffectiveMaxConcurrency(db) === 8, 'effective concurrency for 8 is 8');
 
       // Test limit 10: effective cap capped at MAX_WORKERS (8)
-      db.query("UPDATE settings SET max_concurrency = 10 WHERE id = 1").run();
-      assert(getEffectiveMaxConcurrency(db) === MAX_WORKERS, `effective concurrency for 10 must be ${MAX_WORKERS}`);
+      db.query('UPDATE settings SET max_concurrency = 10 WHERE id = 1').run();
+      assert(
+        getEffectiveMaxConcurrency(db) === MAX_WORKERS,
+        `effective concurrency for 10 must be ${MAX_WORKERS}`,
+      );
 
       // Legacy run backfill: row with NULL deadline_at
-      const repo = createRepository(db, { name: 'r_legacy', displayPath: createRepoDir(tempDir, 'p13'), defaultProvider: 'codex' });
+      const repo = createRepository(db, {
+        name: 'r_legacy',
+        displayPath: createRepoDir(tempDir, 'p13'),
+        defaultProvider: 'codex',
+      });
       const task = createTask(db, { repoId: repo.id, title: 'Legacy Task', priority: 'P1' });
-      const claim = claimTask(db, task.id, { ownerId: 'eng_p13', generation: 0, idempotencyKey: 'p13_c' });
+      const claim = claimTask(db, task.id, {
+        ownerId: 'eng_p13',
+        generation: 0,
+        idempotencyKey: 'p13_c',
+      });
 
       // Artificially clear deadline_at to model legacy row
-      db.query("UPDATE runs SET deadline_at = NULL WHERE id = ?").run(claim.runId);
+      db.query('UPDATE runs SET deadline_at = NULL WHERE id = ?').run(claim.runId);
       const legacyRun = getRunById(db, claim.runId);
       if (!legacyRun) throw new Error('legacyRun missing');
       assert(legacyRun.deadline_at === null, 'deadline_at cleared');

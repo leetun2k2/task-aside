@@ -1,5 +1,8 @@
+import { z } from 'zod';
 import type { CreateMessageInput, Message } from '../contracts/chat.ts';
+import { MessageSchema } from '../contracts/chat.ts';
 import type { SettingsResponse, UpdateSettingsInput } from '../contracts/settings.ts';
+import { SettingsResponseSchema } from '../contracts/settings.ts';
 import type {
   CreateRepositoryInput,
   CreateTaskInput,
@@ -9,8 +12,16 @@ import type {
   TaskStatus,
   UpdateTaskInput,
 } from '../contracts/task.ts';
+import { RepositorySchema, TaskSchema } from '../contracts/task.ts';
 
 const AUTH_STORAGE_KEY = 'taskaside:auth_token';
+
+export class StorageUnavailableError extends Error {
+  constructor(message = 'Session storage is unavailable') {
+    super(message);
+    this.name = 'StorageUnavailableError';
+  }
+}
 
 export function getStoredAuthToken(): string | null {
   if (typeof window === 'undefined') return null;
@@ -20,7 +31,21 @@ export function getStoredAuthToken(): string | null {
     const url = new URL(window.location.href);
     const tokenParam = url.searchParams.get('token');
     if (tokenParam) {
-      window.sessionStorage.setItem(AUTH_STORAGE_KEY, tokenParam);
+      try {
+        window.sessionStorage.setItem(AUTH_STORAGE_KEY, tokenParam);
+      } catch {
+        // Storage is unavailable (e.g. strict private browsing or quota limits).
+        // Report recoverable error without logging the credential value.
+        console.warn(
+          'Session storage is unavailable. Token will remain in memory for this session only.',
+        );
+      }
+
+      // Strip only 'token' parameter while preserving other query params and hash (SPECIFICATION.md §8.1)
+      url.searchParams.delete('token');
+      const cleanUrl = `${url.pathname}${url.search ? url.search : ''}${url.hash}`;
+      window.history.replaceState(null, '', cleanUrl);
+
       return tokenParam;
     }
   } catch {
@@ -39,7 +64,7 @@ export function setStoredAuthToken(token: string): void {
   try {
     window.sessionStorage.setItem(AUTH_STORAGE_KEY, token);
   } catch {
-    // Ignore storage error
+    console.warn('Session storage write failed.');
   }
 }
 
@@ -55,7 +80,14 @@ export class ApiError extends Error {
   }
 }
 
-interface RequestOptions extends RequestInit {
+export class MalformedResponseError extends ApiError {
+  constructor(message = 'Malformed response from server', details?: unknown) {
+    super(502, 'MALFORMED_RESPONSE', message, details);
+    this.name = 'MalformedResponseError';
+  }
+}
+
+export interface RequestOptions extends RequestInit {
   token?: string;
   baseUrl?: string;
 }
@@ -72,10 +104,18 @@ async function request<T>(path: string, options: RequestOptions = {}): Promise<T
     headers.set('Content-Type', 'application/json');
   }
 
-  const response = await fetch(`${baseUrl}${path}`, {
-    ...options,
-    headers,
-  });
+  let response: Response;
+  try {
+    response = await fetch(`${baseUrl}${path}`, {
+      ...options,
+      headers,
+    });
+  } catch (err) {
+    if (err instanceof Error && err.name === 'AbortError') {
+      throw err;
+    }
+    throw err;
+  }
 
   const contentType = response.headers.get('content-type') ?? '';
   const hasJson = contentType.includes('application/json');
@@ -115,19 +155,43 @@ export async function fetchTasks(
 
   const qs = params.toString();
   const path = `/api/tasks${qs ? `?${qs}` : ''}`;
-  return request<Task[]>(path, { method: 'GET', ...options });
+  const raw = await request<unknown>(path, { method: 'GET', ...options });
+  const parsed = z.array(TaskSchema).safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError('Tasks response validation failed', parsed.error.issues);
+  }
+  return parsed.data;
 }
 
 export async function fetchTaskById(id: string, options?: RequestOptions): Promise<Task> {
-  return request<Task>(`/api/tasks/${encodeURIComponent(id)}`, { method: 'GET', ...options });
+  const raw = await request<unknown>(`/api/tasks/${encodeURIComponent(id)}`, {
+    method: 'GET',
+    ...options,
+  });
+  const parsed = TaskSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      `Task response validation failed for id: ${id}`,
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function createTask(input: CreateTaskInput, options?: RequestOptions): Promise<Task> {
-  return request<Task>('/api/tasks', {
+  const raw = await request<unknown>('/api/tasks', {
     method: 'POST',
     body: JSON.stringify(input),
     ...options,
   });
+  const parsed = TaskSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Created task response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function updateTask(
@@ -135,46 +199,91 @@ export async function updateTask(
   input: UpdateTaskInput,
   options?: RequestOptions,
 ): Promise<Task> {
-  return request<Task>(`/api/tasks/${encodeURIComponent(id)}`, {
+  const raw = await request<unknown>(`/api/tasks/${encodeURIComponent(id)}`, {
     method: 'PATCH',
     body: JSON.stringify(input),
     ...options,
   });
+  const parsed = TaskSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Updated task response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function cancelTask(id: string, options?: RequestOptions): Promise<Task> {
-  return request<Task>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
+  const raw = await request<unknown>(`/api/tasks/${encodeURIComponent(id)}/cancel`, {
     method: 'POST',
     ...options,
   });
+  const parsed = TaskSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Cancelled task response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function retryTask(id: string, options?: RequestOptions): Promise<Task> {
-  return request<Task>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
+  const raw = await request<unknown>(`/api/tasks/${encodeURIComponent(id)}/retry`, {
     method: 'POST',
     ...options,
   });
+  const parsed = TaskSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Retried task response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function fetchRepositories(options?: RequestOptions): Promise<Repository[]> {
-  return request<Repository[]>('/api/repositories', { method: 'GET', ...options });
+  const raw = await request<unknown>('/api/repositories', { method: 'GET', ...options });
+  const parsed = z.array(RepositorySchema).safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Repositories response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function createRepository(
   input: CreateRepositoryInput,
   options?: RequestOptions,
 ): Promise<Repository> {
-  return request<Repository>('/api/repositories', {
+  const raw = await request<unknown>('/api/repositories', {
     method: 'POST',
     body: JSON.stringify(input),
     ...options,
   });
+  const parsed = RepositorySchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Created repository response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export interface MessagesResponse {
   messages: Message[];
   nextCursor: string | null;
 }
+
+const MessagesResponseSchema = z.object({
+  messages: z.array(MessageSchema),
+  nextCursor: z.string().nullable().optional(),
+});
 
 export async function fetchMessages(
   taskId: string,
@@ -187,7 +296,15 @@ export async function fetchMessages(
 
   const qs = params.toString();
   const path = `/api/tasks/${encodeURIComponent(taskId)}/messages${qs ? `?${qs}` : ''}`;
-  return request<MessagesResponse>(path, { method: 'GET', ...options });
+  const raw = await request<unknown>(path, { method: 'GET', ...options });
+  const parsed = MessagesResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError('Messages response validation failed', parsed.error.issues);
+  }
+  return {
+    messages: parsed.data.messages,
+    nextCursor: parsed.data.nextCursor ?? null,
+  };
 }
 
 export async function postMessage(
@@ -195,25 +312,45 @@ export async function postMessage(
   input: CreateMessageInput,
   options?: RequestOptions,
 ): Promise<Message> {
-  return request<Message>(`/api/tasks/${encodeURIComponent(taskId)}/messages`, {
+  const raw = await request<unknown>(`/api/tasks/${encodeURIComponent(taskId)}/messages`, {
     method: 'POST',
     body: JSON.stringify(input),
     ...options,
   });
+  const parsed = MessageSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Posted message response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
 
 export async function fetchSettings(options?: RequestOptions): Promise<SettingsResponse> {
-  return request<SettingsResponse>('/api/settings', { method: 'GET', ...options });
+  const raw = await request<unknown>('/api/settings', { method: 'GET', ...options });
+  const parsed = SettingsResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError('Settings response validation failed', parsed.error.issues);
+  }
+  return parsed.data;
 }
 
 export async function updateSettings(
   input: UpdateSettingsInput,
   options?: RequestOptions,
 ): Promise<SettingsResponse> {
-  return request<SettingsResponse>('/api/settings', {
+  const raw = await request<unknown>('/api/settings', {
     method: 'PATCH',
     body: JSON.stringify(input),
     ...options,
   });
+  const parsed = SettingsResponseSchema.safeParse(raw);
+  if (!parsed.success) {
+    throw new MalformedResponseError(
+      'Updated settings response validation failed',
+      parsed.error.issues,
+    );
+  }
+  return parsed.data;
 }
-

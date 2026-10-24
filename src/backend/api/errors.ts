@@ -2,19 +2,10 @@
 // (SPECIFICATION.md §7: typed `{code,message,details?}` bodies, no stack traces).
 import type { Hono } from 'hono';
 import type { ContentfulStatusCode } from 'hono/utils/http-status';
-import { ERROR_CODE_HTTP_STATUS, type ErrorCode } from '../../contracts/errors.ts';
+import { ERROR_CODE_HTTP_STATUS } from '../../contracts/errors.ts';
+import { DomainError } from '../errors.ts';
 
-export class DomainError extends Error {
-  readonly code: ErrorCode;
-  readonly details?: unknown;
-
-  constructor(code: ErrorCode, message: string, details?: unknown) {
-    super(message);
-    this.name = 'DomainError';
-    this.code = code;
-    this.details = details;
-  }
-}
+export { DomainError };
 
 export function registerErrorHandler(app: Hono): void {
   app.onError((err, c) => {

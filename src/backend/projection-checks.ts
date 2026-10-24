@@ -6,6 +6,12 @@ import { tmpdir } from 'node:os';
 import { join, relative } from 'node:path';
 import { Hono } from 'hono';
 import {
+  BrowserMessageCompletedSchema,
+  BrowserMessageDeltaSchema,
+  BrowserTaskStatusChangedSchema,
+  parseBrowserEventPayload,
+} from '../contracts/index.ts';
+import {
   type BrowserEvent,
   EventHub,
   type HubEvent,
@@ -318,6 +324,54 @@ async function main(): Promise<void> {
         unsub();
       }
     });
+
+    await check(
+      'typed: browser event schemas validate deltas, agent completions, and human messages',
+      () => {
+        // 1. Delta with task identity (RF-16)
+        const deltaPayload = {
+          taskId: 'task-abc',
+          runId: 'run-123',
+          messageId: 'msg-1',
+          delta: 'streaming text',
+        };
+        const deltaParsed = BrowserMessageDeltaSchema.safeParse(deltaPayload);
+        assert(deltaParsed.success, 'expected delta schema to validate');
+
+        // 2. Agent completion with run identity
+        const agentPayload = {
+          messageId: 'msg-2',
+          taskId: 'task-abc',
+          conversationId: 'conv-xyz',
+          role: 'agent',
+          content: 'final agent answer',
+          runId: 'run-123',
+          createdAt: new Date().toISOString(),
+        };
+        const agentParsed = BrowserMessageCompletedSchema.safeParse(agentPayload);
+        assert(agentParsed.success, 'expected agent message schema to validate');
+        assert(agentParsed.data.runId === 'run-123', 'expected runId to be preserved');
+
+        // 3. Human completion without fabricated runId
+        const humanPayload = {
+          messageId: 'msg-3',
+          taskId: 'task-abc',
+          conversationId: 'conv-xyz',
+          role: 'user',
+          content: 'user reply',
+          createdAt: new Date().toISOString(),
+        };
+        const humanParsed = BrowserMessageCompletedSchema.safeParse(humanPayload);
+        assert(humanParsed.success, 'expected human message schema to validate without runId');
+        assert(humanParsed.data.runId === undefined, 'expected human message to have no runId');
+
+        // 4. Malformed payload handling
+        const malformedRes = parseBrowserEventPayload('message.delta', {
+          delta: 'missing required fields',
+        }) as { success: boolean };
+        assert(!malformedRes.success, 'expected malformed payload to fail validation');
+      },
+    );
 
     // --- 5. Bounded Clients & Slow Subscriber Protection --------------------
     await check('bounded: max concurrent clients enforcement', () => {

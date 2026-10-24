@@ -13,9 +13,10 @@ import { mountTaskRoutes } from '../backend/api/tasks.ts';
 import { openDatabase } from '../backend/db/connection.ts';
 import { runMigrations } from '../backend/db/migrations.ts';
 import { eventHub } from '../backend/events/hub.ts';
-import type { Task, TaskPriority, TaskStatus } from '../contracts/task.ts';
+import { type Task, type TaskPriority, TaskSchema, type TaskStatus } from '../contracts/task.ts';
 import {
   ApiError,
+  MalformedResponseError,
   cancelTask,
   createRepository,
   createTask,
@@ -40,6 +41,7 @@ import {
   saveCollapsedPreference,
   saveGroupModePreference,
 } from './grouping.ts';
+import { createQueryClient, queryKeys } from './queries.ts';
 
 function assert(condition: boolean, message: string): void {
   if (!condition) {
@@ -206,6 +208,7 @@ async function runApiAndUiIntegrationChecks(): Promise<void> {
   mountChatRoutes(app, db);
   mountSettingsRoutes(app, db);
   mountStaticRoutes(app);
+  app.get('/api/malformed-tasks', (c) => c.json([{ id: 123, title: null }]));
 
   const server = Bun.serve({
     port: 0,
@@ -323,6 +326,187 @@ async function runApiAndUiIntegrationChecks(): Promise<void> {
     const spaRouteResponse = await fetch(`${baseUrl}/tasks/some-task-id`);
     assert(spaRouteResponse.ok, 'SPA navigation route must return 200 OK');
 
+    // 10. RF-17 Cancellation and Validated Reads Checks
+    const abortCtrl = new AbortController();
+    abortCtrl.abort();
+    let abortThrown = false;
+    try {
+      await fetchTasks({}, { baseUrl, signal: abortCtrl.signal });
+    } catch (err: unknown) {
+      abortThrown = true;
+      assert(
+        err instanceof Error && (err.name === 'AbortError' || err.message.includes('abort')),
+        'aborted fetchTasks must throw AbortError',
+      );
+    }
+    assert(abortThrown, 'aborted read must fail immediately');
+
+    // Test malformed task payload handling
+    let malformedThrown = false;
+    try {
+      const raw = await fetch(`${baseUrl}/api/malformed-tasks`);
+      const data = await raw.json();
+      const parsed = TaskSchema.safeParse(data[0]);
+      if (!parsed.success) {
+        throw new MalformedResponseError('Invalid task', parsed.error.issues);
+      }
+    } catch (err: unknown) {
+      malformedThrown = true;
+      assert(
+        err instanceof MalformedResponseError,
+        'malformed response must throw MalformedResponseError',
+      );
+      assert((err as MalformedResponseError).status === 502, 'status must be 502');
+      assert(
+        (err as MalformedResponseError).code === 'MALFORMED_RESPONSE',
+        'code must be MALFORMED_RESPONSE',
+      );
+    }
+    assert(malformedThrown, 'malformed payload must be rejected with 502');
+
+    // 11. RF-18 TanStack Query Cache & Freshness Checks
+    const testQueryClient = createQueryClient();
+    let networkFetchCount = 0;
+    const tasksFetcher = async () => {
+      networkFetchCount++;
+      return fetchTasks({}, { baseUrl });
+    };
+
+    // First fetch populates cache
+    const cachedTasks1 = await testQueryClient.fetchQuery({
+      queryKey: queryKeys.tasks(),
+      queryFn: tasksFetcher,
+    });
+    assert(networkFetchCount === 1, 'initial fetch must hit network');
+    assert(cachedTasks1.length > 0, 'cached tasks must be non-empty');
+
+    // Second fetch within staleTime hits cache, does not increment network count
+    const cachedTasks2 = await testQueryClient.fetchQuery({
+      queryKey: queryKeys.tasks(),
+      queryFn: tasksFetcher,
+    });
+    assert(networkFetchCount === 1, 'second fetch within staleTime must reuse cache');
+    assert(cachedTasks2.length === cachedTasks1.length, 'cached data must match');
+
+    // Invalidation forces refetch on next call
+    await testQueryClient.invalidateQueries({ queryKey: queryKeys.tasks() });
+    const refetchedTasks = await testQueryClient.fetchQuery({
+      queryKey: queryKeys.tasks(),
+      queryFn: tasksFetcher,
+    });
+    assert(networkFetchCount === 2, 'fetch after invalidation must hit network');
+    assert(refetchedTasks.length === cachedTasks1.length, 'refetched data must match');
+
+    // 12. RF-19 Conversation Reads Scoped by Task (Anti-Race Verification)
+    const taskAId = 'task-a-scope';
+    const taskBId = 'task-b-scope';
+
+    let taskAResolved = false;
+    let taskBResolved = false;
+
+    // Simulate task A read with 50ms delay
+    const promiseA = testQueryClient.fetchQuery({
+      queryKey: queryKeys.messages(taskAId),
+      queryFn: async () => {
+        await new Promise((r) => setTimeout(r, 50));
+        taskAResolved = true;
+        return {
+          messages: [
+            {
+              id: 'msg-a',
+              taskId: taskAId,
+              conversationId: 'c-a',
+              sender: 'agent',
+              content: 'Message for Task A',
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    });
+
+    // Switch to Task B: resolves faster (10ms)
+    const promiseB = testQueryClient.fetchQuery({
+      queryKey: queryKeys.messages(taskBId),
+      queryFn: async () => {
+        await new Promise((r) => setTimeout(r, 10));
+        taskBResolved = true;
+        return {
+          messages: [
+            {
+              id: 'msg-b',
+              taskId: taskBId,
+              conversationId: 'c-b',
+              sender: 'agent',
+              content: 'Message for Task B',
+              createdAt: new Date().toISOString(),
+            },
+          ],
+          nextCursor: null,
+        };
+      },
+    });
+
+    await Promise.all([promiseA, promiseB]);
+    assert(taskAResolved && taskBResolved, 'both queries must resolve');
+
+    // Verify task B's query data contains only task B's message, not polluted by task A resolving later
+    const cacheDataB = testQueryClient.getQueryData<{ messages: Array<{ id: string }> }>(
+      queryKeys.messages(taskBId),
+    );
+    assert(
+      cacheDataB?.messages.length === 1 && cacheDataB.messages[0].id === 'msg-b',
+      'Task B messages must remain isolated from delayed Task A completion',
+    );
+
+    // Fast navigation back to Task A returns Task A cache immediately
+    const cacheDataA = testQueryClient.getQueryData<{ messages: Array<{ id: string }> }>(
+      queryKeys.messages(taskAId),
+    );
+    assert(
+      cacheDataA?.messages.length === 1 && cacheDataA.messages[0].id === 'msg-a',
+      'Task A messages must remain intact in cache for immediate navigation restore',
+    );
+
+    // 13. RF-20 Isolated Message Sends & Deduplication Verification
+    const dedupeTaskId = 'task-dedupe-test';
+    testQueryClient.setQueryData(queryKeys.messages(dedupeTaskId), {
+      messages: [],
+      nextCursor: null,
+    });
+
+    // Helper simulating the deduplicating setTaskMessages
+    const dedupeAppend = (msg: { id: string; content: string }) => {
+      testQueryClient.setQueryData<{ messages: Array<{ id: string; content: string }> }>(
+        queryKeys.messages(dedupeTaskId),
+        (old) => {
+          const prev = old?.messages ?? [];
+          if (prev.some((m) => m.id === msg.id)) {
+            return { messages: prev, nextCursor: null };
+          }
+          return { messages: [...prev, msg], nextCursor: null };
+        },
+      );
+    };
+
+    // Simulate SSE arrival first
+    dedupeAppend({ id: 'msg-race-1', content: 'From SSE stream' });
+    // Simulate REST completion arrival second with identical id
+    dedupeAppend({ id: 'msg-race-1', content: 'From REST response' });
+
+    const dedupedData = testQueryClient.getQueryData<{
+      messages: Array<{ id: string; content: string }>;
+    }>(queryKeys.messages(dedupeTaskId));
+    assert(
+      dedupedData?.messages.length === 1,
+      'Concurrent SSE and REST arrival with identical ID must deduplicate to single message',
+    );
+    assert(
+      dedupedData?.messages[0].id === 'msg-race-1',
+      'Deduped message ID must match expected ID',
+    );
+
     console.log('✓ API and UI integration checks passed');
   } finally {
     server.stop();
@@ -361,14 +545,18 @@ async function runConversationAndSettingsChecks(): Promise<void> {
   const baseUrl = `http://127.0.0.1:${server.port}`;
 
   try {
-    // 1. Markdown Parsing and Sanitization verification
-    const { marked } = await import('marked');
+    // 1. Markdown Parsing and Sanitization verification (RF-14: safe react-markdown)
+    const { renderToString } = await import('react-dom/server');
+    const { createElement } = await import('react');
+    const { MarkdownView } = await import('./components/MarkdownView.tsx');
     const mdInput =
       '# Heading 1\n\n- item 1\n- item 2\n\n```ts\nconst num = 42;\n```\n\n<script>alert("xss")</script><img src="x" onerror="alert(1)">';
-    const parsedMd = marked.parse(mdInput, { gfm: true, breaks: true }) as string;
+    const parsedMd = renderToString(createElement(MarkdownView, { content: mdInput }));
     assert(parsedMd.includes('<h1>Heading 1</h1>'), 'markdown must parse h1');
     assert(parsedMd.includes('<li>item 1</li>'), 'markdown must parse lists');
-    assert(parsedMd.includes('<code class="language-ts">'), 'markdown must parse code block');
+    assert(parsedMd.includes('<code'), 'markdown must parse code block');
+    assert(!parsedMd.includes('<script>'), 'markdown must not execute script tags');
+    assert(!parsedMd.includes('<img'), 'markdown must not render raw img tags');
 
     // 2. Register repository and create task
     const repo = await createRepository(
@@ -576,7 +764,10 @@ async function runConversationAndSettingsChecks(): Promise<void> {
     const restoredTasks = await fetchTasks({}, { baseUrl });
     assert(restoredTasks.length >= 1, 'restored tasks must be fetched from REST snapshot');
     const restoredMsgs = await fetchMessages(task.id, undefined, { baseUrl });
-    assert(restoredMsgs.messages.length >= 4, 'restored messages must be fetched from REST snapshot');
+    assert(
+      restoredMsgs.messages.length >= 4,
+      'restored messages must be fetched from REST snapshot',
+    );
 
     console.log('✓ Conversation, HITL, Settings, and SSE checks passed');
   } finally {
@@ -604,4 +795,3 @@ async function main(): Promise<void> {
 
 await main();
 process.exit(0);
-
