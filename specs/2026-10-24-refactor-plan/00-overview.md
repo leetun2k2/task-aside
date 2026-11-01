@@ -10,6 +10,10 @@
 
 **Start here:** [execution order and task tracker](03-execution-plan.md), [small task cards](04-task-cards.md), and [Antigravity handoff prompt](05-antigravity-prompt.md).
 
+**Code organization follow-up (2026-10-25):** [whole-repository layer plan](../2026-10-25-layered-code-organization.md). The user confirmed all owners are in scope and simple reads may skip services. This extends R4; implementation has not started and prior task statuses are unchanged.
+
+Hand off through the new [47-task tracker](../2026-10-25-layered-code-organization/01-execution-plan.md) and [Antigravity prompt](../2026-10-25-layered-code-organization/03-antigravity-prompt.md); resume the new queue at LC-01a rather than restarting RF tasks.
+
 ## Delivery order
 
 ```mermaid

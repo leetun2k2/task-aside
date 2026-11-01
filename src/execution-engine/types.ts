@@ -8,7 +8,7 @@ import type {
   MarkUncertainRequest,
 } from '../contracts/run.ts';
 import type { Settings } from '../contracts/settings.ts';
-import type { Repository, Task, TaskPriority } from '../contracts/task.ts';
+import type { Provider, Repository, Task, TaskPriority } from '../contracts/task.ts';
 
 export interface TaskRecord extends Task {
   conversationId?: string;
@@ -28,7 +28,12 @@ export interface ChildTaskSummary {
 
 export interface TaskContext {
   task: TaskRecord;
-  repository: Repository;
+  // Null while the task is still in Intake stage with no resolved repo
+  // (specs/2026-10-25-message-intake). Always non-null by the time the
+  // implementation claim dispatches.
+  repository: Repository | null;
+  resolvedRepositories?: Repository[];
+  authorizedRepositories?: Repository[];
   parent: TaskRecord | null;
   conversation: { id: string; createdAt: string; updatedAt: string } | null;
   messages: Message[];
@@ -39,6 +44,7 @@ export interface ActiveRun {
   runId: string;
   taskId: string;
   workingTreeKey: string;
+  workingTreeKeys?: string[];
   generation: number;
   priority: TaskPriority;
   startedAt: string;
@@ -141,6 +147,7 @@ export interface ReconcilerOptions {
 export interface RunStatusRecord {
   runId: string;
   taskId: string;
+  purpose?: 'intake' | 'implementation';
   provider: string;
   status: 'running' | 'hitl' | 'done' | 'error' | 'cancelled' | 'uncertain';
   ownerId: string;
@@ -166,7 +173,7 @@ export interface ResumeHitlParams {
   context: TaskContext;
   response: string;
   requestId?: string;
-  provider?: 'codex' | 'claude';
+  provider?: Provider;
   sessionId?: string;
   scenario?: string;
 }

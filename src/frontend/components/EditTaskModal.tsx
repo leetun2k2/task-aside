@@ -1,19 +1,34 @@
-// Edit Task modal dialog (SPECIFICATION.md §2 T-01, PRD §3).
+// Edit Task modal dialog (specs/2026-10-25-message-intake/01-contracts-and-
+// lifecycle.md): Description is removed; the initial Message can only be
+// corrected before first admission (stage 'intake', status 'todo') — after
+// that, the backend rejects the edit and a new task-targeted chat message
+// is the only way to add instructions.
 import { useEffect, useRef, useState } from 'react';
 import type { Task, TaskPriority, UpdateTaskInput } from '../../contracts/task.ts';
 import { Button } from './ui/Button.tsx';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/Dialog.tsx';
+import { IconX } from './ui/Icons.tsx';
 
 interface EditTaskModalProps {
   task: Task | null;
+  /** Current content of the task's initial chat message, looked up by the
+   * caller via `task.initialMessageId` — this modal has no message-fetching
+   * of its own. */
+  initialMessage: string;
   isOpen: boolean;
   onClose: () => void;
   onSubmit: (id: string, input: UpdateTaskInput) => Promise<void>;
 }
 
-export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModalProps) {
+export function EditTaskModal({
+  task,
+  initialMessage,
+  isOpen,
+  onClose,
+  onSubmit,
+}: EditTaskModalProps) {
   const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
+  const [message, setMessage] = useState('');
   const [priority, setPriority] = useState<TaskPriority>('P2');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
@@ -26,18 +41,19 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
       if (boundTaskIdRef.current !== task.id) {
         boundTaskIdRef.current = task.id;
         setTitle(task.title);
-        setDescription(task.description ?? '');
+        setMessage(initialMessage);
         setPriority(task.priority);
         setError(null);
       }
     } else if (!isOpen) {
       boundTaskIdRef.current = null;
     }
-  }, [isOpen, task]);
+  }, [isOpen, task, initialMessage]);
 
   if (!isOpen || !task) return null;
 
   const isProcessing = task.status === 'processing';
+  const canEditMessage = task.stage === 'intake' && task.status === 'todo';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -59,8 +75,8 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
       setError(null);
       await onSubmit(targetTaskId, {
         title: title.trim(),
-        description: description.trim() || undefined,
         priority,
+        message: canEditMessage && message.trim() ? message.trim() : undefined,
       });
 
       // Guard against race conditions if task selection switched while in-flight
@@ -85,7 +101,7 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
         <DialogHeader>
           <DialogTitle id="edit-modal-title">Edit Task #{task.id}</DialogTitle>
           <DialogClose className="modal-close-btn" aria-label="Close">
-            ✕
+            <IconX size={15} />
           </DialogClose>
         </DialogHeader>
 
@@ -138,16 +154,22 @@ export function EditTaskModal({ task, isOpen, onClose, onSubmit }: EditTaskModal
             </div>
 
             <div className="form-group">
-              <label htmlFor="edit-task-desc" className="form-label">
-                Description / Context <span className="optional-label">(optional)</span>
+              <label htmlFor="edit-task-message" className="form-label">
+                Message
+                {!canEditMessage && (
+                  <span className="optional-label">
+                    {' '}
+                    (locked — resolved by Intake; post a new message in chat instead)
+                  </span>
+                )}
               </label>
               <textarea
-                id="edit-task-desc"
+                id="edit-task-message"
                 className="form-textarea"
                 rows={4}
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
-                disabled={isProcessing || isSubmitting}
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                disabled={isProcessing || isSubmitting || !canEditMessage}
               />
             </div>
           </div>

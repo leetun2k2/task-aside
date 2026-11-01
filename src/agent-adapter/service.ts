@@ -58,11 +58,27 @@ export function createAdapterApp(options: CreateAdapterAppOptions = {}): Hono {
   const handleGetStatus = (c: import('hono').Context) => {
     const runId = c.req.param('id') ?? '';
     const status = manager.getRunStatus(runId);
-    return c.json(RunStatusResponseSchema.parse(status));
+    const outcome = manager.getRunOutcome(runId);
+    return c.json(
+      RunStatusResponseSchema.parse({
+        ...status,
+        outcome: outcome ?? undefined,
+      }),
+    );
   };
 
   app.get('/internal/v1/runs/:id', handleGetStatus);
   app.get('/internal/v1/runs/:id/status', handleGetStatus);
+
+  // Durable terminal outcome endpoint (specs/2026-10-26-intake-runtime-completion IR-02)
+  app.get('/internal/v1/runs/:id/outcome', (c) => {
+    const runId = c.req.param('id') ?? '';
+    const outcome = manager.getRunOutcome(runId);
+    if (!outcome) {
+      return c.json({ code: 'NOT_FOUND', message: `outcome for run ${runId} not found` }, 404);
+    }
+    return c.json(outcome);
+  });
 
   // Stream run events over SSE with monotonic sequence and optional ?after=seq replay
   app.get('/internal/v1/runs/:id/events', (c) => {

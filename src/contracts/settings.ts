@@ -5,6 +5,8 @@ import { ProviderSchema } from './task.ts';
 export const SettingsSchema = z.object({
   defaultProvider: ProviderSchema,
   maxConcurrency: z.number().int().min(1).max(10),
+  rootWorkspace: z.string().nullable().optional(),
+  activeHarnesses: z.array(ProviderSchema).min(1).default(['claude', 'codex', 'agy']),
   updatedAt: z.string(),
 });
 export type Settings = z.infer<typeof SettingsSchema>;
@@ -13,6 +15,8 @@ export const UpdateSettingsInputSchema = z
   .object({
     defaultProvider: ProviderSchema.optional(),
     maxConcurrency: z.number().int().min(1).max(10).optional(),
+    rootWorkspace: z.string().nullable().optional(),
+    activeHarnesses: z.array(ProviderSchema).min(1).optional(),
   })
   .refine((data) => Object.keys(data).length > 0, {
     message: 'At least one setting field must be provided',

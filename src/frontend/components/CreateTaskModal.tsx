@@ -1,8 +1,11 @@
-// Create Task modal dialog (SPECIFICATION.md §2 T-01, PRD §3).
+// Create Task modal dialog (specs/2026-10-25-message-intake/00-overview.md,
+// 02-delivery-and-acceptance.md MI-03: "One required Markdown Message,
+// collapsed optional fields; no auto-selected repo/P2 override.").
 import { useEffect, useRef, useState } from 'react';
 import type { CreateTaskInput, Repository, TaskPriority } from '../../contracts/task.ts';
 import { Button } from './ui/Button.tsx';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/Dialog.tsx';
+import { IconX } from './ui/Icons.tsx';
 
 interface CreateTaskModalProps {
   isOpen: boolean;
@@ -19,48 +22,45 @@ export function CreateTaskModal({
   onSubmit,
   prefillParentId,
 }: CreateTaskModalProps) {
+  const [message, setMessage] = useState('');
+  const [showOptional, setShowOptional] = useState(false);
   const [title, setTitle] = useState('');
-  const [description, setDescription] = useState('');
-  const [repoId, setRepoId] = useState(repositories[0]?.id ?? '');
-  const [priority, setPriority] = useState<TaskPriority>('P2');
+  const [repoIds, setRepoIds] = useState<string[]>([]);
+  // Unset means "let Intake resolve it" — never sent as an implicit P2
+  // override (01-contracts-and-lifecycle.md "Omission means auto-resolve;
+  // it must not be confused with explicit P2.").
+  const [priority, setPriority] = useState<TaskPriority | ''>('');
   const [parentId, setParentId] = useState(prefillParentId ?? '');
   const [error, setError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
 
   const prevOpenRef = useRef(false);
 
-  // Reset form whenever modal opens or parentId changes
   useEffect(() => {
     if (isOpen && !prevOpenRef.current) {
+      setMessage('');
+      setShowOptional(false);
       setTitle('');
-      setDescription('');
-      setPriority('P2');
+      setRepoIds([]);
+      setPriority('');
       setParentId(prefillParentId ?? '');
-      setRepoId(repositories[0]?.id ?? '');
       setError(null);
     }
     prevOpenRef.current = isOpen;
-  }, [isOpen, prefillParentId, repositories]);
+  }, [isOpen, prefillParentId]);
 
-  // Support late-loaded repositories if repoId is unselected
-  useEffect(() => {
-    if (isOpen && !repoId && repositories.length > 0) {
-      setRepoId(repositories[0].id);
-    }
-  }, [isOpen, repoId, repositories]);
+  const toggleRepo = (id: string) => {
+    setRepoIds((current) =>
+      current.includes(id) ? current.filter((r) => r !== id) : [...current, id],
+    );
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (isSubmitting) return;
 
-    if (!title.trim()) {
-      setError('Title is required');
-      return;
-    }
-
-    const targetRepoId = repoId || (repositories[0] ? repositories[0].id : '');
-    if (!targetRepoId) {
-      setError('Please select or register a repository first');
+    if (!message.trim()) {
+      setError('Message is required');
       return;
     }
 
@@ -68,16 +68,18 @@ export function CreateTaskModal({
       setIsSubmitting(true);
       setError(null);
       await onSubmit({
-        title: title.trim(),
-        description: description.trim() || undefined,
-        repoId: targetRepoId,
-        priority,
+        message: message.trim(),
+        title: title.trim() || undefined,
+        repoIds: repoIds.length > 0 ? repoIds : undefined,
+        priority: priority || undefined,
         parentId: parentId.trim() || undefined,
       });
-      // Reset on success
+      setMessage('');
       setTitle('');
-      setDescription('');
+      setRepoIds([]);
+      setPriority('');
       setParentId('');
+      setShowOptional(false);
       onClose();
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to create task');
@@ -92,7 +94,7 @@ export function CreateTaskModal({
         <DialogHeader>
           <DialogTitle id="modal-title">New Task</DialogTitle>
           <DialogClose className="modal-close-btn" aria-label="Close">
-            ✕
+            <IconX size={15} />
           </DialogClose>
         </DialogHeader>
 
@@ -105,105 +107,114 @@ export function CreateTaskModal({
             )}
 
             <div className="form-group">
-              <label htmlFor="task-title" className="form-label">
-                Title <span className="required-star">*</span>
-              </label>
-              <input
-                id="task-title"
-                type="text"
-                className="form-input"
-                placeholder="e.g. Implement authentication endpoints"
-                value={title}
-                onChange={(e) => setTitle(e.target.value)}
-                required
-                disabled={isSubmitting}
-              />
-            </div>
-
-            <div className="form-row">
-              <div className="form-group form-col">
-                <label htmlFor="task-repo" className="form-label">
-                  Repository <span className="required-star">*</span>
-                </label>
-                <select
-                  id="task-repo"
-                  className="form-select"
-                  value={repoId || (repositories[0]?.id ?? '')}
-                  onChange={(e) => setRepoId(e.target.value)}
-                  disabled={isSubmitting || repositories.length === 0}
-                >
-                  {repositories.length === 0 ? (
-                    <option value="">No repositories registered</option>
-                  ) : (
-                    repositories.map((repo) => (
-                      <option key={repo.id} value={repo.id}>
-                        {repo.name} ({repo.displayPath})
-                      </option>
-                    ))
-                  )}
-                </select>
-              </div>
-
-              <div className="form-group form-col">
-                <label htmlFor="task-priority" className="form-label">
-                  Priority
-                </label>
-                <select
-                  id="task-priority"
-                  className="form-select"
-                  value={priority}
-                  onChange={(e) => setPriority(e.target.value as TaskPriority)}
-                  disabled={isSubmitting}
-                >
-                  <option value="P0">P0 · Critical</option>
-                  <option value="P1">P1 · High</option>
-                  <option value="P2">P2 · Normal</option>
-                  <option value="P3">P3 · Low</option>
-                </select>
-              </div>
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="task-parent" className="form-label">
-                Parent Task ID <span className="optional-label">(optional)</span>
-              </label>
-              <input
-                id="task-parent"
-                type="text"
-                className="form-input"
-                placeholder="Leave empty for root task"
-                value={parentId}
-                onChange={(e) => setParentId(e.target.value)}
-                disabled={isSubmitting}
-              />
-            </div>
-
-            <div className="form-group">
-              <label htmlFor="task-desc" className="form-label">
-                Description / Context <span className="optional-label">(optional)</span>
+              <label htmlFor="task-message" className="form-label">
+                Message <span className="required-star">*</span>
               </label>
               <textarea
-                id="task-desc"
+                id="task-message"
                 className="form-textarea"
-                rows={4}
-                placeholder="Task details, instructions, or acceptance requirements..."
-                value={description}
-                onChange={(e) => setDescription(e.target.value)}
+                rows={6}
+                placeholder="Describe what you want done, in Markdown. Repository, title and priority are optional — Intake resolves them."
+                value={message}
+                onChange={(e) => setMessage(e.target.value)}
+                required
+                autoFocus
                 disabled={isSubmitting}
               />
             </div>
+
+            {!showOptional ? (
+              <button
+                type="button"
+                className="form-optional-toggle"
+                onClick={() => setShowOptional(true)}
+              >
+                + Title, repository hints, priority, parent (optional)
+              </button>
+            ) : (
+              <>
+                <div className="form-group">
+                  <label htmlFor="task-title" className="form-label">
+                    Title <span className="optional-label">(optional — overrides Intake)</span>
+                  </label>
+                  <input
+                    id="task-title"
+                    type="text"
+                    className="form-input"
+                    placeholder="Leave empty to let Intake generate one"
+                    value={title}
+                    onChange={(e) => setTitle(e.target.value)}
+                    disabled={isSubmitting}
+                  />
+                </div>
+
+                <div className="form-row">
+                  <div className="form-group form-col">
+                    <span className="form-label">
+                      Repository hints <span className="optional-label">(optional)</span>
+                    </span>
+                    {repositories.length === 0 ? (
+                      <p className="form-hint">No repositories registered yet.</p>
+                    ) : (
+                      <div className="form-checkbox-list">
+                        {repositories.map((repo) => (
+                          <label key={repo.id} className="form-checkbox-item">
+                            <input
+                              type="checkbox"
+                              checked={repoIds.includes(repo.id)}
+                              onChange={() => toggleRepo(repo.id)}
+                              disabled={isSubmitting}
+                            />
+                            {repo.name}
+                          </label>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div className="form-group form-col">
+                    <label htmlFor="task-priority" className="form-label">
+                      Priority <span className="optional-label">(optional)</span>
+                    </label>
+                    <select
+                      id="task-priority"
+                      className="form-select"
+                      value={priority}
+                      onChange={(e) => setPriority(e.target.value as TaskPriority | '')}
+                      disabled={isSubmitting}
+                    >
+                      <option value="">Auto (Intake decides)</option>
+                      <option value="P0">P0 · Critical</option>
+                      <option value="P1">P1 · High</option>
+                      <option value="P2">P2 · Normal</option>
+                      <option value="P3">P3 · Low</option>
+                    </select>
+                  </div>
+                </div>
+
+                <div className="form-group">
+                  <label htmlFor="task-parent" className="form-label">
+                    Parent Task ID <span className="optional-label">(optional)</span>
+                  </label>
+                  <input
+                    id="task-parent"
+                    type="text"
+                    className="form-input"
+                    placeholder="Leave empty for root task"
+                    value={parentId}
+                    onChange={(e) => setParentId(e.target.value)}
+                    disabled={isSubmitting}
+                  />
+                </div>
+              </>
+            )}
           </div>
 
           <div className="modal-footer">
             <Button type="button" variant="secondary" onClick={onClose} disabled={isSubmitting}>
               Cancel
             </Button>
-            <Button
-              type="submit"
-              variant="primary"
-              isLoading={isSubmitting}
-              disabled={isSubmitting || repositories.length === 0}
-            >
+            <Button type="submit" variant="primary" isLoading={isSubmitting} disabled={isSubmitting}>
               {isSubmitting ? 'Creating...' : 'Create Task'}
             </Button>
           </div>

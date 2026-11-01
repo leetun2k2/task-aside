@@ -4,6 +4,8 @@
 // - Adapter missing run (404), unreachable, or unverified stop -> mark-uncertain & quarantine lock.
 // - Cancel active run -> cancel on adapter; on verified stop finalize as cancelled; on failure mark-uncertain.
 // Architecture boundary: no direct SQLite access and no provider subprocess spawn.
+import { ROUTING_INSTRUCTION_VERSION } from '../contracts/intake.ts';
+import type { RunOutcome } from '../contracts/run.ts';
 import {
   type AdapterClient,
   AdapterClientError,
@@ -11,7 +13,12 @@ import {
   BackendClientError,
 } from './client.ts';
 import type { TaskScheduler } from './scheduler.ts';
-import type { CancelAndReconcileResult, ReconcileRunResult, ReconcilerOptions } from './types.ts';
+import type {
+  CancelAndReconcileResult,
+  ReconcileRunResult,
+  ReconcilerOptions,
+  RunStatusRecord,
+} from './types.ts';
 
 export class RunReconciler {
   private backendClient: BackendClient;
@@ -51,8 +58,9 @@ export class RunReconciler {
   async reconcileRun(runId: string, _generation: number): Promise<ReconcileRunResult> {
     let ownerId = this.options.ownerId;
     let generation = _generation;
+    let runRecord: RunStatusRecord | null = null;
     try {
-      const runRecord = await this.backendClient.getRun(runId);
+      runRecord = await this.backendClient.getRun(runId);
       ownerId = runRecord.ownerId;
       generation = runRecord.generation;
     } catch {
@@ -69,6 +77,49 @@ export class RunReconciler {
       if (status === 'done' || status === 'error' || status === 'cancelled') {
         const verifiedStopped = processState.verifiedStoppedAt !== null;
         if (verifiedStopped) {
+          if (runRecord?.purpose === 'intake') {
+            if (status === 'done') {
+              let outcome: RunOutcome | null = null;
+              try {
+                outcome = await this.adapterClient.getRunOutcome(runId);
+              } catch {}
+              if (outcome?.intakeResult) {
+                await this.backendClient.commitIntakeResult(runId, {
+                  ownerId,
+                  generation,
+                  verifiedStopped: true,
+                  verificationMethod: processState.verificationMethod ?? 'process_group_empty',
+                  result: outcome.intakeResult,
+                  routingInstructionVersion: ROUTING_INSTRUCTION_VERSION,
+                });
+                this.scheduler.releaseRun(runId);
+                return {
+                  runId,
+                  reconciled: true,
+                  status,
+                  quarantined: false,
+                  verifiedStopped: true,
+                };
+              }
+            }
+
+            await this.backendClient.failIntake(runId, {
+              ownerId,
+              generation,
+              verifiedStopped: true,
+              verificationMethod: processState.verificationMethod ?? 'process_group_empty',
+              reason: `Reconciliation: Intake attempt finished with status '${status}'`,
+            });
+            this.scheduler.releaseRun(runId);
+            return {
+              runId,
+              reconciled: true,
+              status,
+              quarantined: false,
+              verifiedStopped: true,
+            };
+          }
+
           await this.backendClient.finalize(runId, {
             ownerId,
             generation,

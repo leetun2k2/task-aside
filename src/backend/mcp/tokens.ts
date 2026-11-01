@@ -40,6 +40,15 @@ const ALL_MANAGED_TOOLS: McpToolName[] = [
   'yield_task',
 ];
 
+// Intake has no code-writing tools or ambient MCP servers (specs/2026-10-25
+// -message-intake/01-contracts-and-lifecycle.md "It has only the scoped
+// task/chat MCP tools needed for Intake; no code-writing tools or ambient
+// MCP servers."). `request_input` is deliberately excluded too — the
+// engine commits one HITL request from Intake's own structured
+// `action: "request_input"` result, "without a second MCP question side
+// effect" (same doc, "Intake result is structured data").
+const INTAKE_MANAGED_TOOLS: McpToolName[] = ['create_task', 'get_task'];
+
 interface McpTokenRow {
   id: string;
   token: string;
@@ -66,6 +75,7 @@ export function mintManagedMcpToken(
   db: Database,
   runId: string,
   taskId: string,
+  toolProfile?: 'intake' | 'full',
 ): { id: string; token: string; runId: string; taskId: string } {
   const task = getTaskById(db, taskId);
   if (!task) {
@@ -83,13 +93,14 @@ export function mintManagedMcpToken(
   const id = randomUUID();
   const token = `mcp-m-${randomBytes(24).toString('hex')}`;
   const now = new Date().toISOString();
+  const allowedTools = toolProfile === 'intake' ? INTAKE_MANAGED_TOOLS : ALL_MANAGED_TOOLS;
 
   db.query(
     `INSERT INTO mcp_tokens
       (id, token, role, client_name, run_id, task_id, allowed_tools,
        allowed_repo_ids, allowed_task_ids, expires_at, revoked, created_at)
      VALUES (?, ?, 'mcp-managed', 'managed-agent', ?, ?, ?, NULL, NULL, NULL, 0, ?)`,
-  ).run(id, token, runId, taskId, JSON.stringify(ALL_MANAGED_TOOLS), now);
+  ).run(id, token, runId, taskId, JSON.stringify(allowedTools), now);
 
   return { id, token, runId, taskId };
 }

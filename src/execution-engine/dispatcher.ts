@@ -13,8 +13,16 @@
 // slot for a different run never reuses the prior run's entry: each entry is
 // created fresh on dispatch/resume and deleted once that run's monitoring
 // ends (bounded memory, no leaked timers/listeners).
+import { mkdirSync } from 'node:fs';
 import { type EventEnvelope, PERSISTENT_EVENT_TYPES } from '../contracts/event.ts';
+import {
+  INTAKE_DEADLINE_MS,
+  IntakeResultSchema,
+  ROUTING_INSTRUCTION_VERSION,
+} from '../contracts/intake.ts';
 import type { ClaimTaskResponse } from '../contracts/run.ts';
+import type { Provider } from '../contracts/task.ts';
+import { buildIntakeInstruction } from './instruction-builder.ts';
 import {
   type AdapterClient,
   AdapterClientError,
@@ -43,7 +51,7 @@ export interface DispatchTaskParams {
   task: TaskRecord;
   claim: ClaimTaskResponse | { runId: string; generation: number; [key: string]: unknown };
   context: TaskContext;
-  provider?: 'codex' | 'claude';
+  provider?: Provider;
   scenario?: string; // For testing fake adapter scenarios
   simulateLostAck?: boolean;
 }
@@ -210,7 +218,7 @@ export class RunDispatcher {
     task: TaskRecord;
     claim: ClaimTaskResponse | { runId: string; generation: number; [key: string]: unknown };
     context: TaskContext;
-    provider?: 'codex' | 'claude';
+    provider?: Provider;
     scenario?: string;
     simulateLostAck?: boolean;
   }): Promise<DispatchResult> {
@@ -219,7 +227,13 @@ export class RunDispatcher {
       'deadlineAt' in params.claim && typeof params.claim.deadlineAt === 'string'
         ? params.claim.deadlineAt
         : undefined;
-    const provider = params.provider ?? 'codex';
+    const provider = params.provider ?? params.context.repository?.defaultProvider ?? 'claude';
+    const repository = params.context.repository;
+    if (!repository) {
+      throw new Error(
+        `dispatchTask requires a resolved repository (task ${params.task.id} is still stage 'intake')`,
+      );
+    }
 
     // Fresh isolated stream state for this attempt — never reuses a prior
     // attempt's cursor/delta/timer, even if a slot is reused for a different run.
@@ -267,16 +281,25 @@ export class RunDispatcher {
       }
 
       // 4. Start run on adapter (idempotent; returns existing snapshot if already started).
+      const writeRoots = (params.claim as { writeRoots?: string[] }).writeRoots ?? [
+        repository.canonicalPath,
+      ];
       const startPayload = {
+        protocolVersion: 'v2' as const,
         runId,
         taskId: params.task.id,
+        purpose: 'implementation' as const,
         provider,
-        cwd: params.context.repository.canonicalPath,
+        cwd: repository.canonicalPath,
+        writeRoots,
         instruction,
         ownerId: this.options.ownerId,
         generation,
+        runFence: (params.claim as { runFence?: number }).runFence ?? generation,
+        lockGenerations: (params.claim as { lockGenerations?: Record<string, number> })
+          .lockGenerations,
         mcp: mcpConfig,
-        deadlineAt,
+        deadlineAt: (params.claim as { deadlineAt?: string }).deadlineAt ?? deadlineAt,
       };
 
       try {
@@ -336,6 +359,7 @@ export class RunDispatcher {
     startAfter?: number;
     simulateLostAck?: boolean;
     heartbeatAbortedRef?: { current: boolean };
+    purpose?: 'intake' | 'implementation';
   }): Promise<DispatchResult> {
     const { runId, taskId, generation, startAfter = 0, simulateLostAck } = params;
     const state = this.forwarder.initRun(runId, startAfter);
@@ -473,13 +497,26 @@ export class RunDispatcher {
         };
       }
 
-      await this.backendClient.finalize(runId, {
-        ownerId: this.options.ownerId,
-        generation,
-        status: terminalStatus,
-        verifiedStopped,
-        verificationMethod: verificationMethod ?? 'process_group_empty',
-      });
+      if (params.purpose === 'intake') {
+        // No generic finalize: committing the validated Intake result (or
+        // failing it) IS this attempt's finalization (01-contracts-and-
+        // lifecycle.md "atomically commit resolution, finish the Intake
+        // run, revoke its token and release its slot").
+        await this.commitOrFailIntake({
+          runId,
+          generation,
+          terminalStatus,
+          verificationMethod: verificationMethod ?? 'process_group_empty',
+        });
+      } else {
+        await this.backendClient.finalize(runId, {
+          ownerId: this.options.ownerId,
+          generation,
+          status: terminalStatus,
+          verifiedStopped,
+          verificationMethod: verificationMethod ?? 'process_group_empty',
+        });
+      }
 
       // Release lock in scheduler
       this.scheduler.releaseRun(runId);
@@ -504,6 +541,209 @@ export class RunDispatcher {
   }
 
   /**
+   * Extracts the ONE final structured JSON object an Intake attempt must
+   * produce as its entire final message — never parsed from Markdown
+   * fences, raw logs, or arbitrary braces in prose (01-contracts-and-
+   * lifecycle.md "The JSON is one final object; do not parse it from
+   * Markdown fences, raw logs, or arbitrary braces in prose."). Only a
+   * `message.completed` event whose ENTIRE trimmed content parses as one
+   * JSON object qualifies.
+   */
+  private extractIntakeResult(runId: string): unknown {
+    const events = this.forwarder.getForwardedEvents(runId);
+    const completed = [...events].reverse().find((e) => e.type === 'message.completed');
+    if (!completed) {
+      return undefined;
+    }
+    const content = String((completed.data as { content?: unknown }).content ?? '').trim();
+    try {
+      return JSON.parse(content);
+    } catch {
+      return undefined;
+    }
+  }
+
+  /** After verified stop, validate and commit (or fail) the Intake attempt. */
+  private async commitOrFailIntake(params: {
+    runId: string;
+    generation: number;
+    terminalStatus: 'done' | 'error' | 'cancelled';
+    verificationMethod: 'process_group_empty' | 'ps_fingerprint_absent';
+  }): Promise<void> {
+    const { runId, generation, terminalStatus, verificationMethod } = params;
+
+    if (terminalStatus !== 'done') {
+      await this.backendClient.failIntake(runId, {
+        ownerId: this.options.ownerId,
+        generation,
+        verifiedStopped: true,
+        verificationMethod,
+        reason: `Intake attempt ended with status '${terminalStatus}' before producing a result`,
+      });
+      return;
+    }
+
+    let raw: unknown = undefined;
+    try {
+      const outcome = await this.adapterClient.getRunOutcome(runId);
+      if (outcome?.intakeResult) {
+        raw = outcome.intakeResult;
+      }
+    } catch {
+      // fallback to forwarded events
+    }
+    if (!raw) {
+      raw = this.extractIntakeResult(runId);
+    }
+    const parsed = IntakeResultSchema.safeParse(raw);
+    if (!parsed.success) {
+      await this.backendClient.failIntake(runId, {
+        ownerId: this.options.ownerId,
+        generation,
+        verifiedStopped: true,
+        verificationMethod,
+        reason: 'Intake did not return one valid final JSON result matching the schema',
+      });
+      return;
+    }
+
+    try {
+      await this.backendClient.commitIntakeResult(runId, {
+        ownerId: this.options.ownerId,
+        generation,
+        verifiedStopped: true,
+        verificationMethod,
+        result: parsed.data,
+        routingInstructionVersion: ROUTING_INSTRUCTION_VERSION,
+      });
+    } catch (err) {
+      // The backend's own independent authorization/persistence checks
+      // (01-contracts-and-lifecycle.md "backend independently validates
+      // persistent constraints and authorization") can still reject a
+      // schema-valid result (unknown repo id, revoked authorization, wrong
+      // parent, ...) — that is an Intake failure too, not an engine crash.
+      await this.backendClient
+        .failIntake(runId, {
+          ownerId: this.options.ownerId,
+          generation,
+          verifiedStopped: true,
+          verificationMethod,
+          reason: `Backend rejected the Intake result: ${err instanceof Error ? err.message : String(err)}`,
+        })
+        .catch(() => {});
+    }
+  }
+
+  /**
+   * Dispatches an Intake attempt (specs/2026-10-25-message-intake/01-
+   * contracts-and-lifecycle.md "Intake attempt"): scratch cwd, no repo
+   * locks, the versioned routing instruction, and a managed MCP token
+   * restricted to the Intake tool profile (create_task/request_input only —
+   * no code-writing tools, no ambient MCP servers). Reuses the same
+   * stream/disconnect/verified-stop machinery as an implementation
+   * dispatch; only the terminal commit step differs (commitOrFailIntake).
+   */
+  async dispatchIntake(params: {
+    task: TaskRecord;
+    claim: ClaimTaskResponse | { runId: string; generation: number; [key: string]: unknown };
+    context: TaskContext;
+    scratchCwd: string;
+    provider?: Provider;
+    scenario?: string;
+  }): Promise<DispatchResult> {
+    const { runId, generation } = params.claim;
+    const provider = params.provider ?? 'claude';
+
+    this.forwarder.initRun(runId, 0);
+
+    // The adapter only checks that `cwd` exists (it does not itself enforce
+    // a registered-repo allowlist); the engine is responsible for ensuring
+    // this app-owned scratch directory is there before dispatch, since it
+    // is never a registered working tree Intake could have inherited.
+    mkdirSync(params.scratchCwd, { recursive: true });
+
+    const instruction = buildIntakeInstruction(params.context);
+
+    let mcpConfig: { endpoint: string; accessToken: string };
+    try {
+      const mcpTokenRes = await this.backendClient.mintManagedMcpToken(runId, {
+        toolProfile: 'intake',
+      });
+      mcpConfig = {
+        endpoint: `${this.backendClient.getBaseUrl()}/mcp`,
+        accessToken: mcpTokenRes.token,
+      };
+    } catch (err: unknown) {
+      await this.backendClient.failIntake(runId, {
+        ownerId: this.options.ownerId,
+        generation,
+        verifiedStopped: true,
+        verificationMethod: 'process_group_empty',
+        reason: `Failed to mint managed MCP token for Intake: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      this.scheduler.releaseRun(runId);
+      this.retire(runId);
+      return {
+        runId,
+        taskId: params.task.id,
+        status: 'error',
+        lastSequence: 0,
+        verifiedStopped: true,
+      };
+    }
+
+    const deadlineAt =
+      (params.claim as { deadlineAt?: string }).deadlineAt ??
+      new Date(Date.now() + INTAKE_DEADLINE_MS).toISOString();
+
+    try {
+      await this.adapterClient.startRun(
+        {
+          protocolVersion: 'v2',
+          runId,
+          taskId: params.task.id,
+          purpose: 'intake',
+          provider,
+          cwd: params.scratchCwd,
+          writeRoots: [],
+          instruction,
+          ownerId: this.options.ownerId,
+          generation,
+          runFence: (params.claim as { runFence?: number }).runFence ?? generation,
+          lockGenerations: {},
+          mcp: mcpConfig,
+          deadlineAt,
+        },
+        params.scenario ? { scenario: params.scenario } : undefined,
+      );
+    } catch (err: unknown) {
+      await this.flushPendingDelta(runId);
+      await this.backendClient.markUncertain(runId, {
+        ownerId: this.options.ownerId,
+        generation,
+        reason: `Adapter startRun failed (intake): ${err instanceof Error ? err.message : String(err)}`,
+      });
+      this.scheduler.releaseRun(runId);
+      this.retire(runId);
+      return {
+        runId,
+        taskId: params.task.id,
+        status: 'uncertain',
+        lastSequence: 0,
+        verifiedStopped: false,
+      };
+    }
+
+    return this.streamEventsToTermination({
+      runId,
+      taskId: params.task.id,
+      generation,
+      startAfter: 0,
+      purpose: 'intake',
+    });
+  }
+
+  /**
    * Resumes a paused HITL run after user input is provided.
    * Handles:
    * 1. Retained adapter process resumption via provideInput.
@@ -513,9 +753,13 @@ export class RunDispatcher {
   async resumeHitlTask(params: ResumeHitlParams): Promise<DispatchResult> {
     const { task, claim, context, response, requestId } = params;
     const { runId, generation } = claim;
-    const provider = params.provider ?? 'codex';
+    const provider = params.provider ?? params.context.repository?.defaultProvider ?? 'claude';
     const deadlineAt =
       'deadlineAt' in claim && typeof claim.deadlineAt === 'string' ? claim.deadlineAt : undefined;
+    const repository = context.repository;
+    if (!repository) {
+      throw new Error(`resumeHitlTask requires a resolved repository (task ${task.id})`);
+    }
 
     // 1. Inspect adapter status
     const runStatus = await this.adapterClient.getRunStatus(runId);
@@ -572,19 +816,30 @@ export class RunDispatcher {
       };
     }
 
+    const writeRoots = (claim as { writeRoots?: string[] }).writeRoots ?? [
+      repository.canonicalPath,
+    ];
+    const runFence = (claim as { runFence?: number }).runFence ?? generation;
+    const lockGenerations = (claim as { lockGenerations?: Record<string, number> }).lockGenerations;
+
     // Process is verified stopped. Check declared provider capabilities:
     if (provCap?.resume) {
       // Provider supports session resume (e.g. Claude Code CLI)
       const resumeInstruction = `User reply: ${response}`;
       await this.adapterClient.startRun(
         {
+          protocolVersion: 'v2',
           runId,
           taskId: task.id,
+          purpose: 'implementation',
           provider,
-          cwd: context.repository.canonicalPath,
+          cwd: repository.canonicalPath,
+          writeRoots,
           instruction: resumeInstruction,
           ownerId: this.options.ownerId,
           generation,
+          runFence,
+          lockGenerations,
           sessionId: params.sessionId,
           deadlineAt,
         },
@@ -604,13 +859,18 @@ export class RunDispatcher {
     const instruction = buildTaskInstruction(context);
     await this.adapterClient.startRun(
       {
+        protocolVersion: 'v2',
         runId,
         taskId: task.id,
+        purpose: 'implementation',
         provider,
-        cwd: context.repository.canonicalPath,
+        cwd: repository.canonicalPath,
+        writeRoots,
         instruction,
         ownerId: this.options.ownerId,
         generation,
+        runFence,
+        lockGenerations,
         deadlineAt,
       },
       params.scenario ? { scenario: params.scenario } : undefined,

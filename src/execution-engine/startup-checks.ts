@@ -165,6 +165,7 @@ async function main(): Promise<void> {
       'A1: task enqueued through MCP after real startup reaches done automatically',
       async () => {
         const createRes = await mcpCreateTask(backendPort, writerToken, {
+          message: 'A1 real-process task',
           title: 'A1 real-process task',
           repoId: repoAId,
           idempotencyKey: 'a1-task-1',
@@ -179,7 +180,10 @@ async function main(): Promise<void> {
           }
           return undefined;
         });
-        assert(finalTask.status === 'done', `expected task to reach done, got ${finalTask.status}`);
+        assert(
+          finalTask.status === 'done',
+          `expected task to reach done, got ${finalTask.status}: ${finalTask.blockedReason}`,
+        );
       },
     );
 
@@ -188,6 +192,7 @@ async function main(): Promise<void> {
     // same automatic loop with no manual intervention.
     await check('A3: independent checkout (repo B) progresses automatically too', async () => {
       const createRes = await mcpCreateTask(backendPort, writerToken, {
+        message: 'A3 repo B task',
         title: 'A3 repo B task',
         repoId: repoBId,
         idempotencyKey: 'a3-task-b-1',
@@ -227,6 +232,7 @@ async function main(): Promise<void> {
         );
 
         const enqueueRes = await mcpCreateTask(backendPort, plannerToken, {
+          message: 'Planner handoff task',
           title: 'Planner handoff task',
           repoId: repoAId,
           idempotencyKey: 'a11-planner-1',
@@ -275,6 +281,7 @@ async function main(): Promise<void> {
         // when we kill the engine process — giving reconciliation something
         // real to observe.
         const createRes = await mcpCreateTask(backendPort, writerToken, {
+          message: 'A9 restart task',
           title: 'A9 restart task',
           repoId: repoAId,
           idempotencyKey: 'a9-task-1',
@@ -354,6 +361,7 @@ async function main(): Promise<void> {
             [repoId],
           );
           const createRes = await mcpCreateTask(crashBackend.port, token, {
+            message: 'A10 cancel-live-task',
             title: 'A10 cancel-live-task',
             repoId,
             idempotencyKey: 'a10-task-1',

@@ -2,6 +2,7 @@
 export {
   PriorityBadge,
   StatusBadge,
+  StatusIcon,
   type PriorityBadgeProps,
   type StatusBadgeProps,
 } from './ui/Badge.tsx';

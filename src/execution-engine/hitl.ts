@@ -5,6 +5,7 @@
 // 3. Ensuring provider tool permissions cannot be approved by ordinary chat text.
 // 4. Rejecting duplicate or stale replies with 409 REQUEST_ALREADY_RESOLVED.
 import type { Message } from '../contracts/chat.ts';
+import type { Provider } from '../contracts/task.ts';
 import type { AdapterClient, BackendClient } from './client.ts';
 import type { RunDispatcher } from './dispatcher.ts';
 import type { TaskScheduler } from './scheduler.ts';
@@ -76,7 +77,7 @@ export class HitlCoordinator {
     conversationId: string;
     requestId: string;
     response: string;
-    provider?: 'codex' | 'claude';
+    provider?: Provider;
     sessionId?: string;
     scenario?: string;
   }): Promise<{ message: Message; dispatchResult: DispatchResult }> {

@@ -33,6 +33,8 @@ A **blocked** `todo` is not a seventh state: store `blockedReason` and machine-r
 - Task delete is out of scope; `cancelled` is retained for traceability.
 - Backend MUST reject invalid parent cycles and MUST bound agent-created nesting and count. **Fixed MVP ceilings (T05 decision, not configurable upward):** `depth(root)=0`, `depth(child)=1`; `create_task` is only permitted when the caller's own depth is 0 (a child cannot spawn a grandchild); at most 5 children per task.
 
+**Superseded for Message-first tasks (2026-10-25/26, specs/2026-10-25-message-intake):** `POST /api/tasks` requires only `message` (Markdown, ≤32 KiB); `title`, `repoId`/`repoIds`, `priority`, `parentId`, `conversationId` and `waitForTaskIds` are optional. `repositoryId` is never required at creation and `agentProvider` is never caller-supplied — both are resolved later by the Intake gate (new `stage`/`resolvedRepoIds`/`executionProvider` fields). `description` is removed from the create/edit surface; `PATCH` accepts `title`/`priority`/`message` (the last only before first admission). This is a superset, not a breaking removal, of the row above for legacy callers lacking `message` — see `legacyCreateTaskAdapter` in `src/backend/api/tasks.ts`.
+
 ### T-02 Grouping and UI
 
 - Sidebar task list nested grouping is **one of** `state→priority` or `priority→state`; both group levels must have accurate counts and collapse states.
@@ -46,7 +48,7 @@ A **blocked** `todo` is not a seventh state: store `blockedReason` and machine-r
 
 ### C-01 Chat
 
-- Create one conversation per task when task is created; `conversationId` stored on task. A single conversation can have many execution runs.
+- Create one conversation per task when task is created; `conversationId` stored on task. A single conversation can have many execution runs. **Superseded (2026-10-25/26, specs/2026-10-25-message-intake):** task creation may pass an authorized `conversationId` to append to an existing conversation (e.g. a verification task sharing its parent's conversation) instead of always creating a new one; `messages.origin_task_id` attributes each message to the task that posted it, and a reply/post on a shared conversation requires an explicit `targetTaskId` once more than one task shares it.
 - `GET /api/conversations/:id/messages?cursor=...&limit=...` returns chronological messages, stable cursor.
 - `POST /api/conversations/:id/messages` accepts user text; validates size and ownership; messages posted during `processing` are **queued for the next safe agent turn**, not injected unpredictably into a live agent.
 - Agent messages are appended via authenticated internal run event API or authorized scoped MCP tool. Chat domain owns messages, not task scheduling.
@@ -72,6 +74,8 @@ A **blocked** `todo` is not a seventh state: store `blockedReason` and machine-r
 - Agent yields parent to child tasks via the MCP `yield_task({childTaskIds?, reason?})` tool. Parent must cease writing and release lock **after verified stop** (same verification as E-01); then parent remains `todo` with `blockKind=children` and `blocked_on_child_ids` set, until every listed child reaches a terminal state.
 - If any child fails/cancels, parent stays blocked, with user-visible reason and a structured per-child error summary once resumed. No automatic loop of spawning replacement children.
 - Use `originRunId` plus caller-provided `idempotencyKey` for child creation; repeated MCP calls must not create duplicates.
+
+**Superseded for Message-first tasks (2026-10-25/26, specs/2026-10-25-message-intake):** terminal delegation is an Intake outcome (`action:'delegate'`), not `yield_task`. Children created via `create_task` during an active Intake attempt are staged (`blockKind='staged_by_parent_intake'`) and unrunnable until that `delegate` result is accepted; acceptance atomically activates them and completes the **parent as `done`** (terminal — no wait, no resume, distinct from the `yield_task`/`blockKind='children'` waiting-parent row above, which remains the legacy path for pre-Intake tasks). An optional verification task may be included, sharing the parent's `conversationId` and a `waitForTaskIds` prerequisite list gating its own eligibility via the same `blocked_on_child_ids` mechanism.
 
 ### E-03 Agent integration
 

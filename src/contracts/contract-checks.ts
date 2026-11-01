@@ -5,16 +5,21 @@ import {
   CancelRunRequestSchema,
   CapabilitiesResponseSchema,
   ClaimTaskRequestSchema,
+  ClaimTaskResponseSchema,
   CreateMessageInputSchema,
   CreateTaskInputSchema,
   type EventEnvelope,
   EventEnvelopeSchema,
   FinalizeRunRequestSchema,
   HeartbeatRequestSchema,
+  IntakeDelegateResultSchema,
+  IntakeImplementResultSchema,
   ListTasksParamsSchema,
   MAX_CHILDREN_PER_TASK,
   MessageSchema,
   PostMessageParamsSchema,
+  RunOutcomeSchema,
+  StartRunRequestSchema,
   TaskSchema,
   canCreateChildTask,
   computeEventHash,
@@ -89,10 +94,15 @@ check('positive: valid task parses', () => {
 
 check('positive: valid create task input parses', () => {
   CreateTaskInputSchema.parse({
+    message: 'New task',
     title: 'New task',
     repoId: 'repo_01',
     priority: 'P2',
   });
+});
+
+check('positive: Message-only create task input parses (no title/repo/priority)', () => {
+  CreateTaskInputSchema.parse({ message: 'Fix the bug in the login flow' });
 });
 
 check('positive: valid chat message parses', () => {
@@ -149,6 +159,49 @@ check('positive: MCP list_tasks params parse', () => {
 
 check('positive: MCP post_message params parse', () => {
   PostMessageParamsSchema.parse({ content: 'status update' });
+});
+
+check('positive: valid run outcome parses', () => {
+  RunOutcomeSchema.parse({
+    runId: 'run_01',
+    terminalStatus: 'done',
+    verifiedStopped: true,
+    verificationMethod: 'process_group_empty',
+    summary: 'Task finished cleanly',
+  });
+});
+
+check('positive: valid StartRunRequest v2 parses with explicit purpose and writeRoots', () => {
+  StartRunRequestSchema.parse({
+    protocolVersion: 'v2',
+    runId: 'run_01',
+    taskId: 'task_01',
+    purpose: 'intake',
+    provider: 'codex',
+    cwd: '/tmp/scratch',
+    writeRoots: [],
+    instruction: '# Intake',
+    ownerId: 'engine_1',
+    generation: 1,
+    runFence: 1,
+  });
+});
+
+check('positive: valid ClaimTaskResponse v2 parses with full lockGenerations and purpose', () => {
+  ClaimTaskResponseSchema.parse({
+    protocolVersion: 'v2',
+    runId: 'run_01',
+    purpose: 'implementation',
+    generation: 1,
+    runFence: 1,
+    leaseExpiresAt: '2026-10-26T12:00:00Z',
+    taskSnapshot: validTask,
+    deadlineAt: '2026-10-26T13:00:00Z',
+    workingTreeKey: '/tmp/repo',
+    writeRoots: ['/tmp/repo'],
+    lockGenerations: { '/tmp/repo': 1 },
+    inputRevision: 0,
+  });
 });
 
 // --- Negative checks --------------------------------------------------------
@@ -208,6 +261,46 @@ check('negative: rejects finalize with verifiedStopped:false on terminal status'
     verifiedStopped: false,
   });
   assert(!result.success, 'expected rejection of unverified stop on terminal status');
+});
+
+check('negative: rejects StartRunRequest with invalid purpose', () => {
+  const result = StartRunRequestSchema.safeParse({
+    runId: 'run_1',
+    taskId: 'task_1',
+    purpose: 'planning',
+    provider: 'codex',
+    cwd: '/tmp',
+    instruction: 'do it',
+    ownerId: 'eng',
+    generation: 1,
+  });
+  assert(!result.success, "expected rejection of invalid purpose 'planning'");
+});
+
+check('negative: rejects IntakeImplementResultSchema with extraneous unknown fields (strict)', () => {
+  const result = IntakeImplementResultSchema.safeParse({
+    version: 1,
+    action: 'implement',
+    title: 'Valid title',
+    repoIds: ['repo_1'],
+    priority: 'P2',
+    executionProvider: 'claude',
+    goal: 'Valid goal',
+    childTaskIds: ['child_1'], // extraneous field from delegate action!
+  });
+  assert(!result.success, 'expected rejection of extraneous field on implement result');
+});
+
+check('negative: rejects IntakeDelegateResultSchema with extraneous unknown fields (strict)', () => {
+  const result = IntakeDelegateResultSchema.safeParse({
+    version: 1,
+    action: 'delegate',
+    title: 'Valid title',
+    priority: 'P2',
+    childTaskIds: ['child_1'],
+    repoIds: ['repo_1'], // extraneous field from implement action!
+  });
+  assert(!result.success, 'expected rejection of extraneous repoIds on delegate result');
 });
 
 check('negative: rejects finalize missing verificationMethod on terminal status', () => {

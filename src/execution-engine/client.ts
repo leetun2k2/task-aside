@@ -7,6 +7,11 @@ import {
   EventEnvelopeSchema,
   type IngestEventsRequest,
 } from '../contracts/event.ts';
+import type {
+  CommitIntakeResultRequest,
+  FailIntakeRequest,
+  IntakeResult,
+} from '../contracts/intake.ts';
 import { CONTROL_REQUEST_TIMEOUT_MS } from '../contracts/pool.ts';
 import {
   type AdmitTaskRequest,
@@ -21,6 +26,8 @@ import {
   type HeartbeatRequest,
   type MarkUncertainRequest,
   type ProvideInputRequest,
+  type RunOutcome,
+  RunOutcomeSchema,
   type RunStatusResponse,
   RunStatusResponseSchema,
   type StartRunRequest,
@@ -136,11 +143,33 @@ export class BackendClient {
     return this.baseUrl;
   }
 
-  async mintManagedMcpToken(runId: string): Promise<{ token: string; expiresAt: string }> {
+  async mintManagedMcpToken(
+    runId: string,
+    options?: { toolProfile?: 'intake' | 'full' },
+  ): Promise<{ token: string; expiresAt: string }> {
     return this.request<{ token: string; expiresAt: string }>(
       'POST',
       `/internal/v1/runs/${encodeURIComponent(runId)}/mcp-token`,
+      options,
     );
+  }
+
+  /** Engine-only, fenced, idempotent acceptance of a validated Intake result
+   * (01-contracts-and-lifecycle.md "Internal Intake result commit"). Called
+   * only after the Intake attempt's process tree is verified stopped. */
+  async commitIntakeResult(
+    runId: string,
+    request: CommitIntakeResultRequest,
+  ): Promise<{ ok: boolean; taskId: string; outcome: IntakeResult['action'] }> {
+    return this.request('POST', `/internal/v1/runs/${encodeURIComponent(runId)}/intake-result`, request);
+  }
+
+  /** Invalid/missing structured output, or a stop that could not commit a
+   * result: the task becomes `error` for explicit retry — "no automatic
+   * provider fallback, repeated semantic repair loop, or retry after
+   * timeout/invalid output" (01-contracts-and-lifecycle.md). */
+  async failIntake(runId: string, request: FailIntakeRequest): Promise<{ ok: boolean }> {
+    return this.request('POST', `/internal/v1/runs/${encodeURIComponent(runId)}/intake-failed`, request);
   }
 
   async getSettings(): Promise<Settings> {
@@ -353,6 +382,14 @@ export class AdapterClient {
       `/internal/v1/runs/${encodeURIComponent(runId)}`,
     );
     return RunStatusResponseSchema.parse(raw);
+  }
+
+  async getRunOutcome(runId: string): Promise<RunOutcome> {
+    const raw = await this.request<unknown>(
+      'GET',
+      `/internal/v1/runs/${encodeURIComponent(runId)}/outcome`,
+    );
+    return RunOutcomeSchema.parse(raw);
   }
 
   async provideInput(runId: string, request: ProvideInputRequest): Promise<{ ok: boolean }> {

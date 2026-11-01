@@ -18,26 +18,30 @@ import {
 } from '../../contracts/mcp.ts';
 import type { TaskPriority, TaskStatus } from '../../contracts/task.ts';
 import { appendMessage, listMessages } from '../domains/chat/messages.ts';
+import { appendMessageUsecase } from '../domains/chat/usecases/append-message-usecase.ts';
+import { listMessagesUsecase } from '../domains/chat/usecases/list-messages-usecase.ts';
 import { getRepositoryById } from '../domains/task/repositories.ts';
 import { recordYieldIntent } from '../domains/task/runs.ts';
 import {
   TASK_COLUMNS,
   type TaskRecord,
   type TaskRow,
-  createTask,
   listTasks as domainListTasks,
   getTaskById,
   rowToTask,
 } from '../domains/task/tasks.ts';
+import { createTaskUsecase } from '../domains/task/usecases/create-task-usecase.ts';
 import { DomainError } from '../errors.ts';
 import { eventHub } from '../events/hub.ts';
+import { recordInputRequired } from '../usecases/request-input-usecase.ts';
 import type { McpAuthContext } from './tokens.ts';
 
 function hashCreateTaskPayload(payload: {
-  title: string;
-  description: string | null;
-  priority: TaskPriority;
-  repoId: string;
+  message: string;
+  title?: string;
+  priority?: TaskPriority;
+  repoId?: string;
+  repoIds?: string[];
 }): string {
   return createHash('sha256').update(canonicalJson(payload)).digest('hex');
 }
@@ -180,7 +184,10 @@ function executeListTasks(
   });
 
   return tasks.filter((t) => {
-    if (authContext.allowedRepoIds && !authContext.allowedRepoIds.has(t.repoId)) {
+    // An unresolved (stage 'intake') task has no repoId yet; a repo-scoped
+    // external token cannot see it until Intake resolves one — it is not
+    // "in scope by default" just because the check can't run.
+    if (authContext.allowedRepoIds && (!t.repoId || !authContext.allowedRepoIds.has(t.repoId))) {
       return false;
     }
     if (authContext.allowedTaskIds && !authContext.allowedTaskIds.has(t.id)) {
@@ -223,7 +230,7 @@ function executeGetTask(db: Database, authContext: McpAuthContext, taskId: strin
     throw new DomainError('NOT_FOUND', `task not found: ${taskId}`);
   }
 
-  if (authContext.allowedRepoIds && !authContext.allowedRepoIds.has(task.repoId)) {
+  if (authContext.allowedRepoIds && (!task.repoId || !authContext.allowedRepoIds.has(task.repoId))) {
     throw new DomainError(
       'FORBIDDEN',
       `repository of task ${taskId} is not in the allowed repo scope`,
@@ -237,24 +244,25 @@ function executeCreateTask(
   db: Database,
   authContext: McpAuthContext,
   params: {
-    title: string;
+    message: string;
+    title?: string;
     description?: string;
     priority?: TaskPriority;
     idempotencyKey?: string;
     repoId?: string;
+    repoIds?: string[];
+    parentId?: string;
+    conversationId?: string;
+    waitForTaskIds?: string[];
   },
 ): TaskRecord {
   if (authContext.role === 'mcp-managed') {
-    // Managed agent: parent is implicitly currentTask, repo is currentTask.repoId.
-    // An explicitly different repoId is rejected — managed child tasks always
-    // inherit the parent's repo (contract table: "Managed task creation").
-    if (params.repoId && params.repoId !== authContext.task.repoId) {
-      throw new DomainError(
-        'FORBIDDEN',
-        `managed child tasks must use the parent's repository (${authContext.task.repoId}); got ${params.repoId}`,
-      );
-    }
-
+    // Managed agent: `parentId` is forced to the calling task's own ID
+    // regardless of what the caller passed (specs/2026-10-25-message-
+    // intake/01-contracts-and-lifecycle.md "Backend rejects any other
+    // parent"). Repo scope is NOT inherited from the parent — Intake
+    // resolves its own scope for the new task via its own fresh Intake
+    // attempt; `repoId`/`repoIds` here are hints like any other creation.
     if (!canCreateChildTask(authContext.task.depth)) {
       throw new DomainError(
         'CHILD_LIMIT_EXCEEDED',
@@ -262,11 +270,9 @@ function executeCreateTask(
       );
     }
 
-    // Check existing child count
     const childCountRow = db
       .query('SELECT COUNT(*) as count FROM tasks WHERE parent_id = ?')
       .get(authContext.taskId) as { count: number };
-
     if (!isWithinChildLimit(childCountRow.count)) {
       throw new DomainError(
         'CHILD_LIMIT_EXCEEDED',
@@ -274,68 +280,41 @@ function executeCreateTask(
       );
     }
 
-    // Idempotency check: if origin_run_id and origin_key match an existing task, return it
-    if (params.idempotencyKey) {
-      const existing = db
-        .query(`SELECT ${TASK_COLUMNS} FROM tasks WHERE origin_run_id = ? AND origin_key = ?`)
-        .get(authContext.runId, params.idempotencyKey) as TaskRow | null;
+    // Staged until the calling Intake attempt's `delegate` outcome is
+    // accepted (01-contracts-and-lifecycle.md "Children are persisted but
+    // staged and unrunnable until Intake result acceptance and verified
+    // stop."). A non-Intake managed run (legacy yield_task delegation)
+    // creates ordinary, immediately-eligible children exactly as before.
+    const stageUntilDelegationAccepted = authContext.run.purpose === 'intake';
 
-      if (existing) {
-        return rowToTask(existing);
-      }
-    }
-
-    const id = randomUUID();
-    const conversationId = randomUUID();
-    const now = new Date().toISOString();
-    const priority = params.priority ?? 'P2';
-
-    const apply = db.transaction(() => {
-      db.query('INSERT INTO conversations (id, created_at, updated_at) VALUES (?, ?, ?)').run(
-        conversationId,
-        now,
-        now,
-      );
-
-      db.query(
-        `INSERT INTO tasks
-          (id, repository_id, conversation_id, parent_id, title, description, priority, status,
-           agent_provider, block_kind, blocked_reason, depth, blocked_on_child_ids, origin_run_id,
-           origin_key, created_at, enqueued_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, 'todo', ?, NULL, NULL, 1, NULL, ?, ?, ?, ?, ?)`,
-      ).run(
-        id,
-        authContext.task.repoId,
-        conversationId,
-        authContext.taskId,
-        params.title,
-        params.description ?? null,
-        priority,
-        authContext.run.provider ?? 'codex',
-        authContext.runId,
-        params.idempotencyKey ?? null,
-        now,
-        now,
-        now,
-      );
-    });
-    apply();
-
-    const created = getTaskById(db, id);
-    if (!created) {
-      throw new DomainError('NOT_FOUND', `failed to create child task: ${id}`);
-    }
-    return created;
+    return createTaskUsecase(
+      db,
+      {
+        message: params.message,
+        title: params.title,
+        priority: params.priority,
+        repoId: params.repoId,
+        repoIds: params.repoIds,
+        parentId: authContext.taskId,
+        conversationId: params.conversationId,
+        waitForTaskIds: params.waitForTaskIds,
+      },
+      {
+        // The parent's own authorized scope bounds the child's — 01-
+        // contracts-and-lifecycle.md "bound child authorization to the
+        // parent's accepted repo scope"; before acceptance, the parent's
+        // currently-authorized set is the best available bound.
+        authorizedRepoIds: authContext.task.authorizedRepoIds ?? undefined,
+        stageUntilDelegationAccepted,
+        originRunId: authContext.runId,
+        originKey: params.idempotencyKey,
+      },
+    );
   }
 
-  // External caller: must explicitly select a registered, authorized repo and
-  // supply an idempotency key — TaskAside never picks a default repo on an
-  // external caller's behalf (contract table: "External callers must supply
-  // repoId and idempotencyKey. Reject missing fields; never select a default
-  // repo.").
-  if (!params.repoId) {
-    throw new DomainError('VALIDATION_ERROR', 'repoId is required for external task creation');
-  }
+  // External caller: must explicitly supply an idempotency key — TaskAside
+  // never deduplicates a Message-only call by its text (01-contracts-and-
+  // lifecycle.md "do not deduplicate by Message text").
   if (!params.idempotencyKey) {
     throw new DomainError(
       'VALIDATION_ERROR',
@@ -343,20 +322,27 @@ function executeCreateTask(
     );
   }
 
-  const repository = getRepositoryById(db, params.repoId);
-  if (!repository) {
-    throw new DomainError('NOT_FOUND', `repository not found: ${params.repoId}`);
-  }
-  if (authContext.allowedRepoIds && !authContext.allowedRepoIds.has(params.repoId)) {
-    throw new DomainError('FORBIDDEN', `repository ${params.repoId} is not in the allowed scope`);
+  // repoId/repoIds are hints, not a constraint on Intake's eventual choice
+  // (01-contracts-and-lifecycle.md) — but an explicitly named hint is still
+  // validated eagerly (registered + authorized) so a typo or out-of-scope
+  // repo fails fast at submission instead of silently surfacing much later
+  // out of Intake.
+  const candidateRepoIds = params.repoIds ?? (params.repoId ? [params.repoId] : []);
+  for (const repoId of candidateRepoIds) {
+    if (!getRepositoryById(db, repoId)) {
+      throw new DomainError('NOT_FOUND', `repository not found: ${repoId}`);
+    }
+    if (authContext.allowedRepoIds && !authContext.allowedRepoIds.has(repoId)) {
+      throw new DomainError('FORBIDDEN', `repository ${repoId} is not in the allowed scope`);
+    }
   }
 
-  const priority = params.priority ?? 'P2';
   const payloadHash = hashCreateTaskPayload({
+    message: params.message,
     title: params.title,
-    description: params.description ?? null,
-    priority,
+    priority: params.priority,
     repoId: params.repoId,
+    repoIds: params.repoIds,
   });
 
   // Durable, per-principal dedup receipt (survives backend restart). Scoped
@@ -390,26 +376,31 @@ function executeCreateTask(
   }
 
   const now = new Date().toISOString();
-  let createdId = '';
-  const apply = db.transaction(() => {
-    const created = createTask(db, {
+  const created = createTaskUsecase(
+    db,
+    {
+      message: params.message,
       title: params.title,
-      description: params.description,
-      priority,
-      repoId: params.repoId as string,
-    });
-    createdId = created.id;
-    db.query(
-      `INSERT INTO external_task_receipts (token_id, idempotency_key, payload_hash, task_id, created_at)
-       VALUES (?, ?, ?, ?, ?)`,
-    ).run(authContext.tokenId, params.idempotencyKey as string, payloadHash, created.id, now);
-  });
-  apply();
+      priority: params.priority,
+      repoId: params.repoId,
+      repoIds: params.repoIds,
+      parentId: params.parentId,
+      conversationId: params.conversationId,
+      waitForTaskIds: params.waitForTaskIds,
+    },
+    {
+      authorizedRepoIds: authContext.allowedRepoIds
+        ? [...authContext.allowedRepoIds]
+        : undefined,
+      beforeCommit: (task) => {
+        db.query(
+          `INSERT INTO external_task_receipts (token_id, idempotency_key, payload_hash, task_id, created_at)
+           VALUES (?, ?, ?, ?, ?)`,
+        ).run(authContext.tokenId, params.idempotencyKey as string, payloadHash, task.id, now);
+      },
+    },
+  );
 
-  const created = getTaskById(db, createdId);
-  if (!created) {
-    throw new DomainError('NOT_FOUND', `failed to create task: ${createdId}`);
-  }
   return created;
 }
 
@@ -419,7 +410,7 @@ function executeGetMessages(
   params: { limit?: number; cursor?: string },
 ): unknown {
   if (authContext.role === 'mcp-managed') {
-    return listMessages(db, authContext.task.conversationId, {
+    return listMessagesUsecase(db, authContext.task.conversationId, {
       limit: params.limit,
       cursor: params.cursor,
     });
@@ -430,7 +421,7 @@ function executeGetMessages(
 
 function executePostMessage(db: Database, authContext: McpAuthContext, content: string): unknown {
   if (authContext.role === 'mcp-managed') {
-    return appendMessage(db, authContext.task.conversationId, { content }, 'agent');
+    return appendMessageUsecase(db, authContext.task.conversationId, { content }, 'agent');
   }
 
   throw new DomainError('VALIDATION_ERROR', 'external post_message requires scoped task');
@@ -446,46 +437,15 @@ function executeRequestInput(
   }
 
   const requestId = randomUUID();
-  const now = new Date().toISOString();
-
-  const apply = db.transaction(() => {
-    appendMessage(db, authContext.task.conversationId, { content: question }, 'agent');
-    db.query('UPDATE runs SET status = ?, pending_input_request_id = ? WHERE id = ?').run(
-      'hitl',
-      requestId,
-      authContext.runId,
-    );
-    db.query('UPDATE tasks SET status = ?, updated_at = ?, version = version + 1 WHERE id = ?').run(
-      'hitl',
-      now,
-      authContext.taskId,
-    );
-  });
-  apply();
-
-  eventHub.publish({
-    type: 'input_required',
-    data: {
-      requestId,
-      taskId: authContext.taskId,
-      conversationId: authContext.task.conversationId,
-      question,
-    },
-  });
-  const updatedTask = db
-    .query('SELECT version FROM tasks WHERE id = ?')
-    .get(authContext.taskId) as { version: number } | null;
-  eventHub.publish({
-    type: 'task.status_changed',
-    data: {
-      taskId: authContext.taskId,
-      status: 'hitl',
-      version: updatedTask?.version ?? 1,
-      updatedAt: now,
-    },
+  const res = recordInputRequired(db, {
+    runId: authContext.runId,
+    taskId: authContext.taskId,
+    conversationId: authContext.task.conversationId,
+    requestId,
+    question,
   });
 
-  return { requestId, question, status: 'hitl' };
+  return { requestId: res.requestId, question: res.question, status: res.status };
 }
 
 function executeYieldTask(

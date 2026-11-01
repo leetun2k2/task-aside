@@ -27,9 +27,14 @@ let db: Database | undefined;
 let app: Hono;
 
 function countTasksInRepo(database: Database, repoId: string): number {
+  // A Message-only task has no resolved repository_id until Intake accepts
+  // one (specs/2026-10-25-message-intake); count a submitted hint too so
+  // this still reflects "tasks aimed at this repo" pre-resolution.
   const row = database
-    .query('SELECT COUNT(*) as count FROM tasks WHERE repository_id = ?')
-    .get(repoId) as { count: number };
+    .query(
+      `SELECT COUNT(*) as count FROM tasks WHERE repository_id = ? OR candidate_repo_ids LIKE ?`,
+    )
+    .get(repoId, `%"${repoId}"%`) as { count: number };
   return row.count;
 }
 
@@ -391,6 +396,7 @@ try {
         params: {
           name: 'create_task',
           arguments: {
+            message: 'Child Task 1',
             title: 'Child Task 1',
             priority: 'P2',
             idempotencyKey: 'child-idem-1',
@@ -416,6 +422,7 @@ try {
         params: {
           name: 'create_task',
           arguments: {
+            message: 'Child Task 1 - Duplicate Attempt',
             title: 'Child Task 1 - Duplicate Attempt',
             priority: 'P2',
             idempotencyKey: 'child-idem-1',
@@ -450,7 +457,7 @@ try {
         method: 'tools/call',
         params: {
           name: 'create_task',
-          arguments: { title: 'Grandchild Task' },
+          arguments: { message: 'Grandchild Task', title: 'Grandchild Task' },
         },
       },
       { authorization: `Bearer ${childToken}` },
@@ -472,7 +479,7 @@ try {
         '/mcp',
         {
           name: 'create_task',
-          arguments: { title: `Child Task ${i}`, priority: 'P3' },
+          arguments: { message: `Child Task ${i}`, title: `Child Task ${i}`, priority: 'P3' },
         },
         { authorization: `Bearer ${managedToken}` },
       );
@@ -485,7 +492,7 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Child Task 6 - Over Limit' },
+        arguments: { message: 'Child Task 6 - Over Limit', title: 'Child Task 6 - Over Limit' },
       },
       { authorization: `Bearer ${managedToken}` },
     );
@@ -704,24 +711,48 @@ try {
     assert(approveRes.status === 201, 'expected 201 on approve-pairing for create_task client');
     const token = approveRes.body.token as string;
 
-    // Missing repoId is a validation failure; no task is created
-    const missingRepo = await request(
+    // repoId is now an optional hint, not a required field — Intake
+    // resolves scope (specs/2026-10-25-message-intake); only `message` and
+    // `idempotencyKey` are required for an external caller.
+    const noRepoHint = await request(
       'POST',
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'No repo given', idempotencyKey: 'k-missing-repo' },
+        arguments: {
+          message: 'No repo given',
+          title: 'No repo given',
+          idempotencyKey: 'k-missing-repo',
+        },
       },
       { authorization: `Bearer ${token}` },
     );
-    assert(missingRepo.status === 400, `expected 400 on missing repoId, got ${missingRepo.status}`);
-    assert(missingRepo.body.code === 'VALIDATION_ERROR', 'expected VALIDATION_ERROR');
+    assert(noRepoHint.status === 200, `expected 200 with no repo hint, got ${noRepoHint.status}`);
+
+    // Missing message is a validation failure
+    const missingMessage = await request(
+      'POST',
+      '/mcp',
+      {
+        name: 'create_task',
+        arguments: { title: 'No message given', idempotencyKey: 'k-missing-message' },
+      },
+      { authorization: `Bearer ${token}` },
+    );
+    assert(
+      missingMessage.status === 400,
+      `expected 400 on missing message, got ${missingMessage.status}`,
+    );
+    assert(missingMessage.body.code === 'VALIDATION_ERROR', 'expected VALIDATION_ERROR');
 
     // Missing idempotencyKey is a validation failure
     const missingKey = await request(
       'POST',
       '/mcp',
-      { name: 'create_task', arguments: { title: 'No key given', repoId: 'repo-1' } },
+      {
+        name: 'create_task',
+        arguments: { message: 'No key given', title: 'No key given', repoId: 'repo-1' },
+      },
       { authorization: `Bearer ${token}` },
     );
     assert(
@@ -737,6 +768,7 @@ try {
       {
         name: 'create_task',
         arguments: {
+          message: 'Unknown repo',
           title: 'Unknown repo',
           repoId: 'repo-does-not-exist',
           idempotencyKey: 'k-unknown',
@@ -754,6 +786,7 @@ try {
       {
         name: 'create_task',
         arguments: {
+          message: 'Forbidden repo',
           title: 'Forbidden repo',
           repoId: 'repo-forbidden',
           idempotencyKey: 'k-forbidden',
@@ -775,15 +808,21 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Goes to repo B', repoId: 'repo-2', idempotencyKey: 'k-repo-b-1' },
+        arguments: {
+          message: 'Goes to repo B',
+          title: 'Goes to repo B',
+          repoId: 'repo-2',
+          idempotencyKey: 'k-repo-b-1',
+        },
       },
       { authorization: `Bearer ${token}` },
     );
     assert(createInB.status === 200, `expected 200 creating in repo-2, got ${createInB.status}`);
     const createdInB = createInB.body.result;
+    assert(createdInB.repoId === null, 'task must not have a resolved repo before Intake');
     assert(
-      createdInB.repoId === 'repo-2',
-      `expected task created in repo-2, got ${createdInB.repoId}`,
+      Array.isArray(createdInB.candidateRepoIds) && createdInB.candidateRepoIds.includes('repo-2'),
+      `expected repo-2 among candidateRepoIds, got ${JSON.stringify(createdInB.candidateRepoIds)}`,
     );
     assert(
       countTasksInRepo(db, 'repo-2') === tasksBeforeB + 1,
@@ -798,7 +837,12 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Goes to repo B', repoId: 'repo-2', idempotencyKey: 'k-repo-b-1' },
+        arguments: {
+          message: 'Goes to repo B',
+          title: 'Goes to repo B',
+          repoId: 'repo-2',
+          idempotencyKey: 'k-repo-b-1',
+        },
       },
       { authorization: `Bearer ${token}` },
     );
@@ -818,7 +862,12 @@ try {
       '/mcp',
       {
         name: 'create_task',
-        arguments: { title: 'Different title now', repoId: 'repo-2', idempotencyKey: 'k-repo-b-1' },
+        arguments: {
+          message: 'Different message now',
+          title: 'Different title now',
+          repoId: 'repo-2',
+          idempotencyKey: 'k-repo-b-1',
+        },
       },
       { authorization: `Bearer ${token}` },
     );
@@ -846,6 +895,7 @@ try {
       {
         name: 'create_task',
         arguments: {
+          message: 'Same key, different principal',
           title: 'Same key, different principal',
           repoId: 'repo-2',
           idempotencyKey: 'k-repo-b-1',

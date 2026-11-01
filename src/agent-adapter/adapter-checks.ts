@@ -608,6 +608,174 @@ async function main(): Promise<void> {
       const body = await res.json();
       assert(body.code === 'NOT_FOUND', `expected NOT_FOUND, got ${body.code}`);
     });
+
+    // 15. LC-05c-p: process-group verification distinguishes a live process
+    // from a confirmed-exited one (the core fix: never fabricate proof).
+    await checkAsync(
+      'process-group: verifyGroupAlreadyStopped distinguishes alive from exited',
+      async () => {
+        const { spawn } = await import('node:child_process');
+        const { verifyGroupAlreadyStopped } = await import('./drivers/process-group.ts');
+        const child = spawn('sleep', ['5'], { detached: true, stdio: 'ignore' });
+        const pgid = child.pid;
+        assert(!!pgid, 'expected a pid for the spawned sleep process');
+        try {
+          const whileAlive = await verifyGroupAlreadyStopped(pgid as number, 100);
+          assert(
+            whileAlive.verifiedStopped === false,
+            'expected verifiedStopped:false while the process is still alive',
+          );
+        } finally {
+          try {
+            process.kill(-(pgid as number), 'SIGKILL');
+          } catch {
+            // already gone
+          }
+        }
+        // Poll until the OS actually reaps the group before asserting empty.
+        let afterKill: { verifiedStopped: boolean } = { verifiedStopped: false };
+        for (let i = 0; i < 20 && !afterKill.verifiedStopped; i++) {
+          afterKill = await verifyGroupAlreadyStopped(pgid as number, 50);
+        }
+        assert(
+          afterKill.verifiedStopped === true,
+          'expected verifiedStopped:true once the process group is confirmed gone',
+        );
+      },
+    );
+
+    // 16. LC-05c-p: an unresolved journal entry (crash-left-over, never
+    // confirmed stopped) blocks a respawn for the same runId, simulated by
+    // constructing a second manager instance over the same journal file.
+    await checkAsync(
+      'restart: unresolved journal entry blocks startRun until resolved',
+      async () => {
+        const { AdapterRunManager } = await import('./manager.ts');
+        const { recordLaunchStarted } = await import('./state/launch-journal.ts');
+        const { join: joinPath } = await import('node:path');
+        const journalPath = joinPath(testDataDir, 'restart-test-journal.json');
+        const runId = `run_restart_${Date.now()}`;
+
+        recordLaunchStarted(
+          {
+            launchId: 'launch_1',
+            runId,
+            provider: 'codex',
+            payloadHash: 'irrelevant-for-this-check',
+            pgid: 999999,
+            startedAt: new Date().toISOString(),
+            status: 'active',
+          },
+          journalPath,
+        );
+
+        // A manager constructed "after the crash" over the same journal file
+        // must see this launch as unresolved and refuse to spawn over it.
+        const restarted = new AdapterRunManager({ journalPath });
+        let threw = false;
+        try {
+          restarted.startRun({
+            protocolVersion: 'v2',
+            runId,
+            taskId: 'task_restart',
+            purpose: 'implementation',
+            provider: 'codex',
+            cwd: process.cwd(),
+            writeRoots: [],
+            instruction: 'test',
+            ownerId: 'owner-restart',
+            generation: 0,
+          });
+        } catch (err) {
+          threw = true;
+          assert(
+            err instanceof Error && 'code' in err && (err as { code: string }).code === 'RUN_UNCERTAIN',
+            `expected RUN_UNCERTAIN, got ${err instanceof Error ? err.message : String(err)}`,
+          );
+        }
+        assert(threw, 'expected startRun to refuse an unresolved prior launch');
+      },
+    );
+
+    // 17. LC-05c-p: a repeated start for the same runId/owner/generation but
+    // a different payload (changed cwd) is rejected, not silently replayed.
+    await checkAsync('start: changed payload for an active launch conflicts', async () => {
+      const { AdapterRunManager } = await import('./manager.ts');
+      const { recordLaunchStarted, computePayloadHash } = await import('./state/launch-journal.ts');
+      const { join: joinPath } = await import('node:path');
+      const { mkdtempSync: mkdtemp } = await import('node:fs');
+      const journalPath = joinPath(testDataDir, 'payload-conflict-journal.json');
+      const runId = `run_payload_${Date.now()}`;
+      const cwdA = mkdtemp(join(tmpdir(), 'taskaside-payload-a-'));
+      const cwdB = mkdtemp(join(tmpdir(), 'taskaside-payload-b-'));
+
+      const manager = new AdapterRunManager({ journalPath });
+      // 'crash' scenario leaves the run permanently 'running' in-memory with
+      // no real process, so a repeated start reaches the owner/generation
+      // match branch without ever exiting.
+      manager.startRun(
+        {
+          protocolVersion: 'v2',
+          runId,
+          taskId: 'task_payload',
+          purpose: 'implementation',
+          provider: 'codex',
+          cwd: cwdA,
+          writeRoots: [],
+          instruction: 'test',
+          ownerId: 'owner-payload',
+          generation: 0,
+        },
+        { scenario: 'crash' },
+      );
+
+      // Seed the journal as if this launch's real pid had been recorded,
+      // bound to the original (cwdA) payload.
+      recordLaunchStarted(
+        {
+          launchId: 'launch_payload',
+          runId,
+          provider: 'codex',
+          payloadHash: computePayloadHash({
+            provider: 'codex',
+            cwd: cwdA,
+            writeRoots: [],
+            purpose: 'implementation',
+            instructionLength: 'test'.length,
+          }),
+          pgid: 999998,
+          startedAt: new Date().toISOString(),
+          status: 'active',
+        },
+        journalPath,
+      );
+
+      let threw = false;
+      try {
+        manager.startRun(
+          {
+            protocolVersion: 'v2',
+            runId,
+            taskId: 'task_payload',
+            purpose: 'implementation',
+            provider: 'codex',
+            cwd: cwdB,
+            writeRoots: [],
+            instruction: 'test',
+            ownerId: 'owner-payload',
+            generation: 0,
+          },
+          { scenario: 'crash' },
+        );
+      } catch (err) {
+        threw = true;
+        assert(
+          err instanceof Error && 'code' in err && (err as { code: string }).code === 'VALIDATION_ERROR',
+          `expected VALIDATION_ERROR, got ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      assert(threw, 'expected a changed payload on repeated start to be rejected');
+    });
   } finally {
     server.stop(true);
     try {

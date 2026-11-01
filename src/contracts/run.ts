@@ -1,6 +1,9 @@
 // Run lifecycle, fencing (ownerId/generation) and agent-adapter contracts.
 import { z } from 'zod';
+import { IntakeResultSchema } from './intake.ts';
 import { ProviderSchema, TaskSchema } from './task.ts';
+
+export const INTERNAL_PROTOCOL_VERSION = 'v2' as const;
 
 export const RunStatusSchema = z.enum([
   'running',
@@ -15,6 +18,17 @@ export type RunStatus = z.infer<typeof RunStatusSchema>;
 export const VerificationMethodSchema = z.enum(['process_group_empty', 'ps_fingerprint_absent']);
 export type VerificationMethod = z.infer<typeof VerificationMethodSchema>;
 
+export const RunOutcomeSchema = z.object({
+  runId: z.string(),
+  terminalStatus: RunStatusSchema,
+  intakeResult: IntakeResultSchema.optional(),
+  summary: z.string().optional(),
+  error: z.string().optional(),
+  verifiedStopped: z.boolean(),
+  verificationMethod: VerificationMethodSchema.nullable().optional(),
+});
+export type RunOutcome = z.infer<typeof RunOutcomeSchema>;
+
 export const ClaimTaskRequestSchema = z.object({
   ownerId: z.string().min(1),
   generation: z.number().int().nonnegative(),
@@ -23,14 +37,20 @@ export const ClaimTaskRequestSchema = z.object({
 export type ClaimTaskRequest = z.infer<typeof ClaimTaskRequestSchema>;
 
 export const ClaimTaskResponseSchema = z.object({
+  protocolVersion: z.literal('v2').default('v2'),
   runId: z.string(),
+  purpose: z.enum(['intake', 'implementation']).default('implementation'),
   generation: z.number().int().nonnegative(),
+  runFence: z.number().int().nonnegative().optional(),
   leaseExpiresAt: z.string(),
   taskSnapshot: TaskSchema,
-  // Durable 60-minute deadline (specs/2026-10-24-polling-worker-pool.md), set
-  // once at claim and never recomputed on resume/retry/restart.
+  // Durable deadline, set once at claim and never recomputed on resume/retry/restart.
   deadlineAt: z.string(),
   workingTreeKey: z.string().optional(),
+  writeRoots: z.array(z.string()).default([]),
+  lockGenerations: z.record(z.string(), z.number()).default({}),
+  inputRevision: z.number().int().nonnegative().default(0),
+  policyHash: z.string().optional(),
 });
 export type ClaimTaskResponse = z.infer<typeof ClaimTaskResponseSchema>;
 
@@ -115,13 +135,18 @@ export const ProvideInputRequestSchema = z.object({
 export type ProvideInputRequest = z.infer<typeof ProvideInputRequestSchema>;
 
 export const StartRunRequestSchema = z.object({
+  protocolVersion: z.literal('v2').default('v2'),
   runId: z.string(),
   taskId: z.string(),
+  purpose: z.enum(['intake', 'implementation']).default('implementation'),
   provider: ProviderSchema,
   cwd: z.string().min(1),
+  writeRoots: z.array(z.string()).default([]),
   instruction: z.string().min(1),
   ownerId: z.string().min(1),
   generation: z.number().int().nonnegative(),
+  runFence: z.number().int().nonnegative().optional(),
+  lockGenerations: z.record(z.string(), z.number()).optional(),
   sessionId: z.string().optional(),
   mcp: z
     .object({
@@ -130,16 +155,18 @@ export const StartRunRequestSchema = z.object({
     })
     .optional(),
   // Durable per-attempt deadline, threaded through so the adapter can enforce
-  // it independently even if the engine exits (specs/2026-10-24-polling-worker-pool.md).
-  // Optional for backward compatibility; the engine always supplies it.
+  // it independently even if the engine exits.
   deadlineAt: z.string().optional(),
+  scenario: z.string().optional(),
 });
-export type StartRunRequest = z.infer<typeof StartRunRequestSchema>;
+export type StartRunRequest = z.input<typeof StartRunRequestSchema>;
+export type ValidatedStartRunRequest = z.output<typeof StartRunRequestSchema>;
 
 export const ProviderCapabilitySchema = z.object({
   available: z.boolean(),
   resume: z.boolean(),
   mcp: z.boolean(),
+  multiRoot: z.boolean().default(false),
   version: z.string().optional(),
   notes: z.string().optional(),
 });
@@ -149,6 +176,7 @@ export const CapabilitiesResponseSchema = z.object({
   providers: z.object({
     codex: ProviderCapabilitySchema,
     claude: ProviderCapabilitySchema,
+    agy: ProviderCapabilitySchema.optional(),
   }),
 });
 export type CapabilitiesResponse = z.infer<typeof CapabilitiesResponseSchema>;
@@ -164,5 +192,6 @@ export type ProcessState = z.infer<typeof ProcessStateSchema>;
 export const RunStatusResponseSchema = z.object({
   runId: z.string(),
   processState: ProcessStateSchema,
+  outcome: RunOutcomeSchema.optional(),
 });
 export type RunStatusResponse = z.infer<typeof RunStatusResponseSchema>;

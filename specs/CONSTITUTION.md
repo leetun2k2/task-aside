@@ -15,7 +15,7 @@ Where simplicity conflicts with correctness in repository safety, **correctness 
 ### I. Local-first and developer-controlled
 
 1. Core scheduling, persistence, task UI and agent execution run on the developer's machine; no TaskAside-operated cloud service is mandatory.
-2. Only explicitly registered local repositories may be used as agent working directories.
+2. Only explicitly registered local repositories may be used as agent working directories. **Narrow exception (2026-10-25/26, specs/2026-10-25-message-intake):** the Intake gate dispatches to an app-owned scratch directory, never a registered repository — it holds no code-writing tools, no working-tree lock, and no ambient MCP server, and it never commits code. This does not widen what an implementation attempt may write to.
 3. The developer can start, inspect status, stop and diagnose the app locally.
 4. Model providers may require external authentication/network requests; never misrepresent this as fully offline inference.
 

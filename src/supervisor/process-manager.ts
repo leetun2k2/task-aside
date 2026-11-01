@@ -145,7 +145,8 @@ export async function startServices(options: StartOptions = {}): Promise<Service
   for (const name of SERVICE_ORDER) {
     const bundledEntry = join(repoRoot, 'dist', 'services', `${name}.js`);
     const sourceEntry = join(repoRoot, SERVICE_ENTRYPOINT[name]);
-    const entrypoint = existsSync(bundledEntry) ? bundledEntry : sourceEntry;
+    const preferDist = process.env.TASKASIDE_USE_DIST === 'true' || !existsSync(sourceEntry);
+    const entrypoint = preferDist && existsSync(bundledEntry) ? bundledEntry : sourceEntry;
     if (!existsSync(entrypoint)) {
       throw new Error(`cannot start ${name}: entrypoint not found at ${entrypoint}`);
     }

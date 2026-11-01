@@ -2,6 +2,7 @@
 // Assembles bounded instructions from task, repository scope, parent context, conversation history,
 // and non-negotiable safety guidelines.
 import type { Message } from '../contracts/chat.ts';
+import { ROUTING_INSTRUCTION_MARKDOWN } from './routing-instruction.ts';
 import type { InstructionOptions, TaskContext } from './types.ts';
 
 const DEFAULT_MAX_HISTORY_MESSAGES = 25;
@@ -60,41 +61,89 @@ export function formatConversationHistory(
   return output;
 }
 
+/** Intake's prompt (specs/2026-10-25-message-intake/03-agent-routing.md):
+ * the versioned routing instruction, the authorized repo catalog (metadata
+ * only — never a filesystem scan), and this conversation's bounded history,
+ * always including the initial Message. No repository-isolation or
+ * code-editing guidance belongs here — Intake has no write tools. */
+export function buildIntakeInstruction(context: TaskContext, options: InstructionOptions = {}): string {
+  const { task, authorizedRepositories, messages } = context;
+
+  const catalog = (authorizedRepositories ?? [])
+    .map((r) => `- \`${r.id}\` — ${r.name} (default provider: ${r.defaultProvider})`)
+    .join('\n');
+
+  const sections: string[] = [
+    ROUTING_INSTRUCTION_MARKDOWN,
+    `## Current task
+- **Task ID**: ${task.id}
+- **Submitted title**: ${task.title ? task.title : '*(none — auto-resolve)*'}
+- **Submitted priority**: ${task.priority ?? '*(none — auto-resolve, not an override)*'}
+- **Repo hints**: ${task.candidateRepoIds && task.candidateRepoIds.length > 0 ? task.candidateRepoIds.join(', ') : '*(none)*'}
+- **Parent task ID**: ${task.parentId ?? '*(none)*'}`,
+    `## Authorized repository catalog
+${catalog || '*(no registered repositories are authorized for this task)*'}`,
+    `## Conversation history (this conversation only)
+${formatConversationHistory(messages, options)}`,
+  ];
+
+  return sections.join('\n\n');
+}
+
 export function buildInstruction(context: TaskContext, options: InstructionOptions = {}): string {
   const { task, repository, parent, messages } = context;
+  if (!repository) {
+    throw new Error(
+      `buildInstruction requires a resolved repository (task ${task.id} is still stage 'intake')`,
+    );
+  }
 
   const sections: string[] = [];
 
-  // 1. Task Header & Goal
+  // 1. Task Header. The goal itself is the task's initial Message, which is
+  // always present in "Conversation History" below (specs/2026-10-25-
+  // message-intake/01-contracts-and-lifecycle.md "Always include the
+  // initial Message in Intake context, even when older history is
+  // truncated" — the same invariant applies to the implementation prompt;
+  // `description` is a removed, legacy-only field).
   const title = task.title.trim();
-  const description = task.description?.trim() || '*(No description provided)*';
 
   sections.push(`# Task: ${title}
 - **Task ID**: ${task.id}
 - **Priority**: ${task.priority}
 - **Status**: ${task.status}
-- **Depth**: ${task.depth}
-
-## Goal & Description
-${description}`);
+- **Depth**: ${task.depth}`);
 
   // 2. Repository Scope
+  const allRepos =
+    context.resolvedRepositories && context.resolvedRepositories.length > 0
+      ? context.resolvedRepositories
+      : [repository];
+  const repoListLines = allRepos
+    .map((r) => `- **${r.name}** (\`${r.id}\`): \`${r.canonicalPath}\``)
+    .join('\n');
+  const allowedRootsStr = allRepos.map((r) => `\`${r.canonicalPath}\``).join(' and ');
+
+  const boundaryNote =
+    allRepos.length > 1
+      ? `Primary working directory: \`${repository.canonicalPath}\`.\nAllowed project roots: ${allowedRootsStr}.\nYou MUST confine all file edits and inspection strictly to the allowed project roots. Use an explicit working directory for commands in each repository. Do not inspect or modify unrelated project directories, follow links outside this scope, or request broader permissions. If another repository is needed, stop and report the missing scope.`
+      : `You MUST confine all file edits and inspection strictly to this repository path. Do not touch or modify any files outside this directory.`;
+
   sections.push(`## Repository Scope
-- **Repository Name**: ${repository.name}
-- **Working Directory**: \`${repository.canonicalPath}\`
+- **Primary Working Directory**: \`${repository.canonicalPath}\`
+${repoListLines}
 
-You MUST confine all file edits and inspection strictly to this repository path. Do not touch or modify any files outside this directory.`);
+${boundaryNote}`);
 
-  // 3. Parent Task Context (if this is a child task)
+  // 3. Parent Task Context (if this is a child task). The parent's own goal
+  // is its initial Message, in its own separate conversation unless shared
+  // (04-delegation-and-follow-up.md) — not fetched here.
   if (parent) {
-    const parentDesc = parent.description?.trim() || '*(No description provided)*';
     sections.push(`## Parent Task Context
 This task was delegated as a subtask of the parent task below.
 - **Parent ID**: ${parent.id}
 - **Parent Title**: ${parent.title}
-- **Parent Priority**: ${parent.priority}
-- **Parent Goal**:
-${parentDesc}`);
+- **Parent Priority**: ${parent.priority}`);
   }
 
   // 3b. Delegated Child Tasks Results (if this parent delegated subtasks)
@@ -134,7 +183,7 @@ ${historyText}`);
   // 5. Safety Guidelines
   if (options.includeSafetyGuidelines !== false) {
     sections.push(`## Non-Negotiable Safety Guidelines
-1. **Working Tree Isolation**: All actions must be contained within \`${repository.canonicalPath}\`. Do not inspect or modify directories outside this path.
+1. **Working Tree Isolation**: All actions must be contained within the allowed project roots (${allowedRootsStr}). Do not inspect or modify directories outside this scope.
 2. **No Unauthorized Commits/Pushes**: Do not run \`git commit\`, \`git push\`, or modify git remote configurations unless explicitly instructed.
 3. **No Destructive Commands**: Do not run destructive git operations (such as \`git reset --hard\`, \`git clean -fdx\`) or destructive deletions (\`rm -rf\`).
 4. **Human In The Loop**: If user input, clarifications, or design decisions are needed, formulate a clear question for the user rather than guessing or proceeding with destructive assumptions.

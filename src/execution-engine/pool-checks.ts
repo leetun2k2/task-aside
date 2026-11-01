@@ -161,11 +161,16 @@ async function mcpCreate(
   token: string,
   args: Record<string, unknown>,
 ): Promise<JsonResponse> {
+  // Message is the only required business field (specs/2026-10-25-message-
+  // intake); every existing call site here predates that and only ever
+  // sets `title`, so backfill `message` from it in one place rather than at
+  // each of this suite's many call sites.
+  const fullArgs = 'message' in args ? args : { ...args, message: args.title };
   const res = await req(
     backendPort,
     'POST',
     '/mcp',
-    { name: 'create_task', arguments: args },
+    { name: 'create_task', arguments: fullArgs },
     { authorization: `Bearer ${token}` },
   );
   if (res.body?.result?.id && !res.body.taskId) {
@@ -456,9 +461,9 @@ async function main(): Promise<void> {
         const b1Start = new Date(runB1.started_at).getTime();
         const b1End = new Date(runB1.ended_at).getTime();
 
-        // Serial execution: A2 started strictly at or after A1 ended (canonical path lock exclusivity)
+        // Serial execution: A1 and A2 must not overlap (canonical path lock exclusivity)
         assert(
-          a2Start >= a1End,
+          a2Start >= a1End || a1Start >= a2End,
           `Task A1 and A2 intervals overlapped! A1: [${a1Start}..${a1End}], A2: [${a2Start}..${a2End}]`,
         );
 

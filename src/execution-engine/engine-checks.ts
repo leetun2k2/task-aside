@@ -9,6 +9,7 @@ import { mountInternalApi, mountPublicApi } from '../backend/api/index.ts';
 import { closeDatabase, openDatabase } from '../backend/db/connection.ts';
 import { runMigrations } from '../backend/db/migrations.ts';
 import { listMessages } from '../backend/domains/chat/messages.ts';
+import { resolveTaskFromIntake } from '../backend/domains/task/repositories/task-write-repository.ts';
 import { createRepository } from '../backend/domains/task/repositories.ts';
 import { createTask } from '../backend/domains/task/tasks.ts';
 import { getTaskById } from '../backend/domains/task/tasks.ts';
@@ -529,7 +530,9 @@ await check('instruction-builder: builds structured markdown with task, repo, an
   );
   assert(instruction.includes('- **Task ID**: task_abc123'), 'must contain task ID');
   assert(instruction.includes('- **Priority**: P0'), 'must contain priority');
-  assert(instruction.includes('Add JWT token verification middleware'), 'must contain description');
+  // `description` is a removed, legacy-only field (specs/2026-10-25-
+  // message-intake) — the goal now comes from conversation history, which
+  // always includes the task's own initial Message.
   assert(
     instruction.includes('`/Users/developer/projects/backend-service`'),
     'must contain canonical path',
@@ -622,10 +625,8 @@ await check('instruction-builder: includes parent task context for delegated chi
   assert(instruction.includes('## Parent Task Context'), 'must contain parent task context header');
   assert(instruction.includes('- **Parent ID**: task_parent_999'), 'must contain parent ID');
   assert(instruction.includes('- **Parent Title**: Full Auth System'), 'must contain parent title');
-  assert(
-    instruction.includes('Parent architecture task overseeing authentication.'),
-    'must contain parent goal',
-  );
+  // The parent's own `description` is a removed, legacy-only field; its
+  // goal lives in its own conversation, not fetched here.
   assert(
     instruction.includes('*(No prior conversation messages)*'),
     'must handle empty messages cleanly',
@@ -1002,9 +1003,12 @@ await check('events: deltas coalesce without delaying control events', async () 
     assert(dispatchRes.status === 'done', 'dispatch must complete');
 
     const messages = listMessages(backend.db, task.conversationId).messages;
-    assert(messages.length === 1, 'must have 1 completed message in conversation');
+    // Message-first tasks (specs/2026-10-25-message-intake) always start
+    // with their own initial user message; the agent's completed message
+    // is the second one in the conversation.
+    assert(messages.length === 2, 'must have the initial message plus 1 completed agent message');
     assert(
-      messages[0].content === 'Hello brave new world!',
+      messages[1].content === 'Hello brave new world!',
       'message content must match control event',
     );
   } finally {
@@ -2616,8 +2620,8 @@ await check(
             params: {
               name: 'create_task',
               arguments: {
+                message: 'Implement auth module',
                 title: 'Delegated Child 1',
-                description: 'Implement auth module',
                 priority: 'P1',
               },
             },
@@ -2633,7 +2637,12 @@ await check(
       assert(childData.id, 'child task must have an ID');
       assert(childData.parentId === parentTask.id, 'child parentId must match parent task ID');
       assert(childData.depth === 1, 'child task depth must be 1');
-      assert(childData.repoId === repo.id, 'child repoId must match repo ID');
+      // A managed child no longer inherits the parent's repository — it
+      // gets its own Intake attempt instead (specs/2026-10-25-message-
+      // intake/01-contracts-and-lifecycle.md "Child creation stays MCP-
+      // owned"); repo is unresolved until that attempt accepts a scope.
+      assert(childData.repoId === null, 'child task must start with no resolved repository');
+      assert(childData.stage === 'intake', 'child task must start in stage intake');
       assert(childData.status === 'todo', 'child task status must be todo');
 
       // Now test that a child task cannot create a grandchild
@@ -2669,6 +2678,7 @@ await check(
             params: {
               name: 'create_task',
               arguments: {
+                message: 'Grandchild Task Attempt',
                 title: 'Grandchild Task Attempt',
               },
             },
@@ -2734,6 +2744,7 @@ await check(
               params: {
                 name: 'create_task',
                 arguments: {
+                  message: title,
                   title,
                   idempotencyKey: idempKey,
                 },
@@ -2826,7 +2837,7 @@ await check(
             method: 'tools/call',
             params: {
               name: 'create_task',
-              arguments: { title: 'Child C1' },
+              arguments: { message: 'Child C1', title: 'Child C1' },
             },
           }),
         }),
@@ -3894,6 +3905,7 @@ await check(
             params: {
               name: 'create_task',
               arguments: {
+                message: 'Child Task Worker',
                 title: 'Child Task Worker',
                 priority: 'P1',
                 repoId: repo.id,
@@ -3908,6 +3920,25 @@ await check(
       };
       const childTaskInfo = JSON.parse(childData.result.content[0].text);
       const childTaskId = childTaskInfo.id;
+
+      // This e2e exercises the legacy yield_task/waiting-parent flow, whose
+      // whole point here is proving same-tree lock handoff without deadlock
+      // — it needs the child already resolved to the parent's repo, exactly
+      // like a pre-Intake/legacy task (specs/2026-10-25-message-intake
+      // leaves a managed child unresolved, pending its own fresh Intake
+      // attempt, which is a different scenario covered elsewhere).
+      resolveTaskFromIntake(backend.db, {
+        id: childTaskId,
+        title: childTaskInfo.title,
+        priority: childTaskInfo.priority,
+        primaryRepoId: repo.id,
+        resolvedRepoIds: [repo.id],
+        executionProvider: repo.defaultProvider,
+        intakeResultJson: JSON.stringify({ test: true }),
+        updatedAt: new Date().toISOString(),
+      });
+      childTaskInfo.repoId = repo.id;
+      childTaskInfo.stage = 'ready';
 
       // Parent yields to child via MCP
       const yieldRes = await backend.app.fetch(
@@ -4516,6 +4547,509 @@ await check(
         }
       }
       assert(claimBlocked, 'working tree must remain quarantined preventing second writer');
+    } finally {
+      backend.cleanup();
+    }
+  },
+);
+
+// --- MR-07: Multi-Repo Execution and Scope Fencing Checks ---
+console.log('\n--- Multi-Repo Execution and Scope Fencing Checks ---');
+
+await check(
+  'multi-repo: atomic claim acquires locks on all resolved repos, concurrent tasks on any resolved repo are blocked with LOCK_HELD',
+  async () => {
+    const backend = createTestBackend();
+    try {
+      const bClient = backend.createClient();
+
+      const alphaDir = backend.createRepoDir('repo-alpha');
+      const betaDir = backend.createRepoDir('repo-beta');
+      const gammaDir = backend.createRepoDir('repo-gamma');
+
+      const repoAlpha = createRepository(backend.db, {
+        name: 'repo-alpha',
+        displayPath: alphaDir,
+        defaultProvider: 'codex',
+      });
+      const repoBeta = createRepository(backend.db, {
+        name: 'repo-beta',
+        displayPath: betaDir,
+        defaultProvider: 'codex',
+      });
+      const repoGamma = createRepository(backend.db, {
+        name: 'repo-gamma',
+        displayPath: gammaDir,
+        defaultProvider: 'codex',
+      });
+
+      // Task targeting alpha + beta
+      const taskMulti = createTask(backend.db, {
+        repoId: repoAlpha.id,
+        title: 'Multi-repo task',
+        priority: 'P1',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: taskMulti.id,
+        title: 'Multi-repo task',
+        priority: 'P1',
+        primaryRepoId: repoAlpha.id,
+        resolvedRepoIds: [repoAlpha.id, repoBeta.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoAlpha.id, repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // Claim taskMulti
+      const claim = await bClient.claimTask(taskMulti.id, {
+        ownerId: 'engine_mr_owner',
+        generation: 0,
+        idempotencyKey: 'mr_claim_1',
+      });
+      assert(claim.runId !== '', 'claim must succeed');
+      assert(claim.writeRoots?.length === 2, 'writeRoots must contain both repos');
+      assert(claim.writeRoots.includes(repoAlpha.canonicalPath), 'writeRoots must include alpha');
+      assert(claim.writeRoots.includes(repoBeta.canonicalPath), 'writeRoots must include beta');
+
+      // Verify both locks are recorded in database
+      const locks = backend.db
+        .query('SELECT working_tree_key, owner_run_id FROM run_locks WHERE owner_run_id = ?')
+        .all(claim.runId) as { working_tree_key: string; owner_run_id: string }[];
+      assert(locks.length === 2, `expected 2 locks in DB, found ${locks.length}`);
+
+      // Concurrent task on repo-alpha must fail with LOCK_HELD
+      const taskAlpha = createTask(backend.db, {
+        repoId: repoAlpha.id,
+        title: 'Alpha task',
+        priority: 'P1',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: taskAlpha.id,
+        title: 'Alpha task',
+        priority: 'P1',
+        primaryRepoId: repoAlpha.id,
+        resolvedRepoIds: [repoAlpha.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoAlpha.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+      let alphaBlocked = false;
+      try {
+        await bClient.claimTask(taskAlpha.id, {
+          ownerId: 'engine_mr_other',
+          generation: 0,
+          idempotencyKey: 'alpha_claim_attempt',
+        });
+      } catch (err: unknown) {
+        if (err instanceof BackendClientError && err.status === 409) {
+          alphaBlocked = true;
+        }
+      }
+      assert(alphaBlocked, 'task on repo-alpha must be blocked with LOCK_HELD');
+
+      // Concurrent task on repo-beta must fail with LOCK_HELD
+      const taskBeta = createTask(backend.db, {
+        repoId: repoBeta.id,
+        title: 'Beta task',
+        priority: 'P1',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: taskBeta.id,
+        title: 'Beta task',
+        priority: 'P1',
+        primaryRepoId: repoBeta.id,
+        resolvedRepoIds: [repoBeta.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+      let betaBlocked = false;
+      try {
+        await bClient.claimTask(taskBeta.id, {
+          ownerId: 'engine_mr_other',
+          generation: 0,
+          idempotencyKey: 'beta_claim_attempt',
+        });
+      } catch (err: unknown) {
+        if (err instanceof BackendClientError && err.status === 409) {
+          betaBlocked = true;
+        }
+      }
+      assert(betaBlocked, 'task on repo-beta must be blocked with LOCK_HELD');
+
+      // Concurrent task on repo-gamma should succeed
+      const taskGamma = createTask(backend.db, {
+        repoId: repoGamma.id,
+        title: 'Gamma task',
+        priority: 'P1',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: taskGamma.id,
+        title: 'Gamma task',
+        priority: 'P1',
+        primaryRepoId: repoGamma.id,
+        resolvedRepoIds: [repoGamma.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoGamma.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+      const gammaClaim = await bClient.claimTask(taskGamma.id, {
+        ownerId: 'engine_mr_other',
+        generation: 0,
+        idempotencyKey: 'gamma_claim_attempt',
+      });
+      assert(gammaClaim.runId !== '', 'independent gamma task must be claimable');
+
+      // Clean finalization of taskMulti releases both locks
+      await bClient.finalize(claim.runId, {
+        ownerId: 'engine_mr_owner',
+        generation: claim.generation,
+        status: 'done',
+        verifiedStopped: true,
+        verificationMethod: 'process_group_empty',
+      });
+
+      // Now repo-alpha can be claimed
+      const alphaAfterClaim = await bClient.claimTask(taskAlpha.id, {
+        ownerId: 'engine_mr_other',
+        generation: 0,
+        idempotencyKey: 'alpha_claim_after',
+      });
+      assert(alphaAfterClaim.runId !== '', 'alpha must be claimable after multi-repo task finalized');
+    } finally {
+      backend.cleanup();
+    }
+  },
+);
+
+await check(
+  'multi-repo: instructions and task context contain all admitted repos and boundaries',
+  async () => {
+    const backend = createTestBackend();
+    try {
+      const bClient = backend.createClient();
+
+      const alphaDir = backend.createRepoDir('repo-alpha');
+      const betaDir = backend.createRepoDir('repo-beta');
+
+      const repoAlpha = createRepository(backend.db, {
+        name: 'repo-alpha',
+        displayPath: alphaDir,
+        defaultProvider: 'claude',
+      });
+      const repoBeta = createRepository(backend.db, {
+        name: 'repo-beta',
+        displayPath: betaDir,
+        defaultProvider: 'claude',
+      });
+
+      const task = createTask(backend.db, {
+        repoId: repoAlpha.id,
+        title: 'Cross repo refactor',
+        priority: 'P0',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: task.id,
+        title: 'Cross repo refactor',
+        priority: 'P0',
+        primaryRepoId: repoAlpha.id,
+        resolvedRepoIds: [repoAlpha.id, repoBeta.id],
+        executionProvider: 'claude',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoAlpha.id, repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const context = await bClient.getTaskContext(task.id);
+      assert(context.resolvedRepositories?.length === 2, 'must have 2 resolvedRepositories');
+      assert(context.resolvedRepositories[0].id === repoAlpha.id, 'primary repo first');
+      assert(context.resolvedRepositories[1].id === repoBeta.id, 'secondary repo second');
+
+      const instruction = buildInstruction(context);
+      assert(instruction.includes('Primary working directory: `' + repoAlpha.canonicalPath + '`'), 'includes primary cwd');
+      assert(instruction.includes('Allowed project roots: `' + repoAlpha.canonicalPath + '` and `' + repoBeta.canonicalPath + '`'), 'includes all roots');
+      assert(instruction.includes('All actions must be contained within the allowed project roots'), 'guidelines bound roots');
+    } finally {
+      backend.cleanup();
+    }
+  },
+);
+
+await check(
+  'multi-repo: execution dispatch passes all write roots, heartbeat refreshes all leases, clean finalize releases all locks',
+  async () => {
+    const backend = createTestBackend();
+    const adapter = createTestAdapter();
+    try {
+      const bClient = backend.createClient();
+      const aClient = adapter.createClient();
+
+      const alphaDir = backend.createRepoDir('repo-alpha');
+      const betaDir = backend.createRepoDir('repo-beta');
+
+      const repoAlpha = createRepository(backend.db, {
+        name: 'repo-alpha',
+        displayPath: alphaDir,
+        defaultProvider: 'codex',
+      });
+      const repoBeta = createRepository(backend.db, {
+        name: 'repo-beta',
+        displayPath: betaDir,
+        defaultProvider: 'codex',
+      });
+
+      const task = createTask(backend.db, {
+        repoId: repoAlpha.id,
+        title: 'Two repo dispatch',
+        priority: 'P2',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: task.id,
+        title: 'Two repo dispatch',
+        priority: 'P2',
+        primaryRepoId: repoAlpha.id,
+        resolvedRepoIds: [repoAlpha.id, repoBeta.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoAlpha.id, repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const scheduler = new TaskScheduler(bClient, { ownerId: 'engine_mr_dispatch' });
+      const dispatcher = new RunDispatcher(bClient, aClient, scheduler, {
+        ownerId: 'engine_mr_dispatch',
+      });
+
+      const claim = await scheduler.scheduleNext();
+      assert(claim.claimed === true, 'claim must succeed');
+
+      // Heartbeat refreshes all leases. The initial claim sets its lock
+      // leases using admission's 60s duration, while heartbeat renews using
+      // the legacy 30s duration (kept intentionally unequal for this slice),
+      // so warm up with one heartbeat before capturing the baseline.
+      const warmupHb = await bClient.heartbeat(claim.runId ?? '', {
+        ownerId: 'engine_mr_dispatch',
+        generation: claim.generation ?? 1,
+      });
+      assert(warmupHb.ok === true, 'warmup heartbeat must succeed');
+
+      const leasesBeforeHeartbeat = backend.db
+        .query('SELECT working_tree_key, lease_expires_at FROM run_locks WHERE owner_run_id = ?')
+        .all(claim.runId ?? '') as { working_tree_key: string; lease_expires_at: string }[];
+      assert(leasesBeforeHeartbeat.length === 2, 'both locks must exist before heartbeat');
+
+      await new Promise((resolve) => setTimeout(resolve, 5));
+      const hb = await bClient.heartbeat(claim.runId ?? '', {
+        ownerId: 'engine_mr_dispatch',
+        generation: claim.generation ?? 1,
+      });
+      assert(hb.ok === true, 'heartbeat must succeed');
+
+      // Verify leases were refreshed for both locks
+      const locksBefore = backend.db
+        .query('SELECT working_tree_key, lease_expires_at FROM run_locks WHERE owner_run_id = ?')
+        .all(claim.runId ?? '') as { working_tree_key: string; lease_expires_at: string }[];
+      assert(locksBefore.length === 2, 'both locks must have active lease');
+      for (const lockAfter of locksBefore) {
+        const before = leasesBeforeHeartbeat.find(
+          (l) => l.working_tree_key === lockAfter.working_tree_key,
+        );
+        assert(before !== undefined, `expected prior lease row for ${lockAfter.working_tree_key}`);
+        assert(
+          lockAfter.lease_expires_at > (before as { lease_expires_at: string }).lease_expires_at,
+          `expected lease to advance for ${lockAfter.working_tree_key}: before=${before?.lease_expires_at} after=${lockAfter.lease_expires_at}`,
+        );
+      }
+
+      const ctx = await bClient.getTaskContext(task.id);
+      const res = await dispatcher.dispatchTask({
+        task: task as unknown as TaskRecord,
+        claim: {
+          runId: claim.runId ?? '',
+          taskId: task.id,
+          generation: claim.generation ?? 1,
+          status: 'running',
+          workingTreeKey: claim.workingTreeKey ?? '',
+          writeRoots: [alphaDir, betaDir],
+        },
+        context: ctx,
+        scenario: 'success',
+      });
+      assert(res.status === 'done', 'dispatch must complete done');
+
+      // After finalization, both locks must be released (owner_run_id is empty)
+      const locksAfter = backend.db
+        .query('SELECT working_tree_key, owner_run_id FROM run_locks WHERE working_tree_key IN (?, ?)')
+        .all(alphaDir, betaDir) as { working_tree_key: string; owner_run_id: string }[];
+      for (const l of locksAfter) {
+        assert(l.owner_run_id === '', `lock on ${l.working_tree_key} must be released`);
+      }
+    } finally {
+      backend.cleanup();
+    }
+  },
+);
+
+await check(
+  'multi-repo: uncertain stop quarantines all held repository locks',
+  async () => {
+    const backend = createTestBackend();
+    try {
+      const bClient = backend.createClient();
+
+      const alphaDir = backend.createRepoDir('repo-alpha');
+      const betaDir = backend.createRepoDir('repo-beta');
+
+      const repoAlpha = createRepository(backend.db, {
+        name: 'repo-alpha',
+        displayPath: alphaDir,
+        defaultProvider: 'claude',
+      });
+      const repoBeta = createRepository(backend.db, {
+        name: 'repo-beta',
+        displayPath: betaDir,
+        defaultProvider: 'claude',
+      });
+
+      const task = createTask(backend.db, {
+        repoId: repoAlpha.id,
+        title: 'Uncertain multi-repo',
+        priority: 'P1',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: task.id,
+        title: 'Uncertain multi-repo',
+        priority: 'P1',
+        primaryRepoId: repoAlpha.id,
+        resolvedRepoIds: [repoAlpha.id, repoBeta.id],
+        executionProvider: 'claude',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoAlpha.id, repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+
+      const claim = await bClient.claimTask(task.id, {
+        ownerId: 'engine_mr_uncert',
+        generation: 0,
+        idempotencyKey: 'uncert_claim',
+      });
+
+      // Mark uncertain (e.g. process lost contact or unverified stop)
+      await bClient.markUncertain(claim.runId, {
+        ownerId: 'engine_mr_uncert',
+        generation: claim.generation,
+        reason: 'Adapter lost process group',
+      });
+
+      // Both locks must now be quarantined
+      const locks = backend.db
+        .query('SELECT working_tree_key, quarantined, quarantined_reason FROM run_locks WHERE working_tree_key IN (?, ?)')
+        .all(repoAlpha.canonicalPath, repoBeta.canonicalPath) as { working_tree_key: string; quarantined: number; quarantined_reason: string }[];
+      assert(locks.length === 2, 'expected 2 lock rows');
+      for (const l of locks) {
+        assert(l.quarantined === 1, `working tree ${l.working_tree_key} must be quarantined`);
+        assert(l.quarantined_reason === 'Adapter lost process group', 'reason recorded');
+      }
+
+      // Supervisor clear quarantine clears both
+      const supervisorClient = backend.createClient('supervisor');
+      const clearRes = await supervisorClient.clearQuarantine(claim.runId, {
+        operatorId: 'supervisor_admin',
+        reason: 'Operator verified process stopped',
+      });
+      assert(clearRes.ok === true, 'clear quarantine must succeed');
+
+      // Both locks unquarantined
+      const clearedLocks = backend.db
+        .query('SELECT working_tree_key, quarantined FROM run_locks WHERE working_tree_key IN (?, ?)')
+        .all(repoAlpha.canonicalPath, repoBeta.canonicalPath) as { working_tree_key: string; quarantined: number }[];
+      for (const l of clearedLocks) {
+        assert(l.quarantined === 0, `working tree ${l.working_tree_key} must be unquarantined`);
+      }
+    } finally {
+      backend.cleanup();
+    }
+  },
+);
+
+await check(
+  'multi-repo: partial contention (one repo busy or quarantined) aborts entire claim atomically with zero locks held',
+  async () => {
+    const backend = createTestBackend();
+    try {
+      const bClient = backend.createClient();
+
+      const alphaDir = backend.createRepoDir('repo-alpha');
+      const betaDir = backend.createRepoDir('repo-beta');
+
+      const repoAlpha = createRepository(backend.db, {
+        name: 'repo-alpha',
+        displayPath: alphaDir,
+        defaultProvider: 'codex',
+      });
+      const repoBeta = createRepository(backend.db, {
+        name: 'repo-beta',
+        displayPath: betaDir,
+        defaultProvider: 'codex',
+      });
+
+      // Pre-lock repoBeta with an active task
+      const priorTask = createTask(backend.db, {
+        repoId: repoBeta.id,
+        title: 'Prior task on beta',
+        priority: 'P0',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: priorTask.id,
+        title: 'Prior task on beta',
+        priority: 'P0',
+        primaryRepoId: repoBeta.id,
+        resolvedRepoIds: [repoBeta.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+      const priorClaim = await bClient.claimTask(priorTask.id, {
+        ownerId: 'prior_owner',
+        generation: 0,
+        idempotencyKey: 'prior_claim',
+      });
+      assert(priorClaim.runId !== '', 'prior claim succeeded');
+
+      // Now create a task that needs BOTH repoAlpha and repoBeta
+      const multiTask = createTask(backend.db, {
+        repoId: repoAlpha.id,
+        title: 'Needs alpha and beta',
+        priority: 'P1',
+      });
+      resolveTaskFromIntake(backend.db, {
+        id: multiTask.id,
+        title: 'Needs alpha and beta',
+        priority: 'P1',
+        primaryRepoId: repoAlpha.id,
+        resolvedRepoIds: [repoAlpha.id, repoBeta.id],
+        executionProvider: 'codex',
+        intakeResultJson: JSON.stringify({ action: 'implement', repoIds: [repoAlpha.id, repoBeta.id] }),
+        updatedAt: new Date().toISOString(),
+      });
+
+      // Attempt claim: must throw LOCK_HELD
+      let claimFailed = false;
+      try {
+        await bClient.claimTask(multiTask.id, {
+          ownerId: 'new_owner',
+          generation: 0,
+          idempotencyKey: 'multi_fail_attempt',
+        });
+      } catch (err: unknown) {
+        if (err instanceof BackendClientError && err.status === 409) {
+          claimFailed = true;
+        }
+      }
+      assert(claimFailed, 'claim must fail with 409 LOCK_HELD due to repoBeta contention');
+
+      // Crucial: repoAlpha must NOT be locked by new_owner! No partial lock held!
+      const alphaLock = backend.db
+        .query('SELECT owner_run_id FROM run_locks WHERE working_tree_key = ?')
+        .get(alphaDir) as { owner_run_id: string } | null;
+      assert(!alphaLock || alphaLock.owner_run_id === '', 'repoAlpha must NOT have any partial lock held');
     } finally {
       backend.cleanup();
     }

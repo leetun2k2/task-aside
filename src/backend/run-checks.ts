@@ -185,12 +185,33 @@ async function main(): Promise<void> {
 
       // --- 5. Heartbeat fencing -------------------------------------------
       await check('heartbeat: succeeds when ownerId and generation match', async () => {
+        // The initial claim sets its lock lease using admission's 60s
+        // duration, while heartbeat renews it using the legacy 30s duration
+        // (kept intentionally unequal for this slice). So compare two
+        // successive heartbeats rather than against the claim-time lease.
+        const warmup = await post(`/internal/v1/runs/${runA}/heartbeat`, 'engine', {
+          ownerId: 'owner-1',
+          generation: 1,
+        });
+        assert(warmup.status === 200, `expected 200, got ${warmup.status}`);
+        const before = db
+          .query('SELECT lease_expires_at FROM run_locks WHERE owner_run_id = ?')
+          .get(runA) as { lease_expires_at: string };
+
+        await new Promise((resolve) => setTimeout(resolve, 5));
         const res = await post(`/internal/v1/runs/${runA}/heartbeat`, 'engine', {
           ownerId: 'owner-1',
           generation: 1,
         });
         assert(res.status === 200, `expected 200, got ${res.status}: ${JSON.stringify(res.body)}`);
         assert(res.body.ok === true, 'expected ok:true');
+        const after = db
+          .query('SELECT lease_expires_at FROM run_locks WHERE owner_run_id = ?')
+          .get(runA) as { lease_expires_at: string };
+        assert(
+          after.lease_expires_at > before.lease_expires_at,
+          `expected lease to advance: before=${before.lease_expires_at} after=${after.lease_expires_at}`,
+        );
       });
 
       await check('heartbeat: fails with 409 STALE_GENERATION on owner mismatch', async () => {

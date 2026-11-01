@@ -8,6 +8,7 @@ import type {
   VerificationMethod,
 } from '../../contracts/index.ts';
 import { AdapterError } from '../errors.ts';
+import { stampVerifiedStop, verifyNaturalStop } from '../services/run-stop-service.ts';
 import type { AdapterRun } from '../types.ts';
 import { terminateProcessGroup } from './process-group.ts';
 import type { AgentDriver, DriverCallbacks, DriverCancelResult } from './types.ts';
@@ -75,16 +76,10 @@ export function buildClaudeArgs(run: AdapterRun): BuildClaudeArgsResult {
     args.push('--session-id', assignedSessionId);
   }
 
-  // Permission handling and output format for unattended streamable execution (T02 §2, §4)
-  args.push(
-    '--permission-mode',
-    'acceptEdits',
-    '--permission-prompts',
-    'none',
-    '--output-format',
-    'stream-json',
-    '--verbose',
-  );
+  if (run.purpose === 'intake') {
+    // Intake profile: disable built-in tools and ambient auto-discovery
+    args.push('--tools', '', '--bare');
+  }
 
   // Scoped MCP: prevent inheriting user ambient ~/.claude configuration (T02 §8, §9, §13)
   args.push('--strict-mcp-config');
@@ -104,6 +99,27 @@ export function buildClaudeArgs(run: AdapterRun): BuildClaudeArgsResult {
   } else {
     args.push('--mcp-config', JSON.stringify({ mcpServers: {} }));
   }
+
+  // Exact additional allowed registered roots for multi-repo writes
+  // Placed BEFORE subsequent option flags so variadic --add-dir is cleanly terminated before prompt
+  if (run.purpose === 'implementation' && run.writeRoots && run.writeRoots.length > 0) {
+    for (const root of run.writeRoots) {
+      if (root !== run.cwd) {
+        args.push('--add-dir', root);
+      }
+    }
+  }
+
+  // Permission handling and output format for unattended streamable execution (T02 §2, §4)
+  args.push(
+    '--permission-mode',
+    'acceptEdits',
+    '--permission-prompts',
+    'none',
+    '--output-format',
+    'stream-json',
+    '--verbose',
+  );
 
   // Trailing argument: prompt
   args.push(run.instruction);
@@ -272,6 +288,7 @@ export class ClaudeDriver implements AgentDriver {
     run.processGroupPid = pgid;
     const procRecord = { child, pgid, wasCancelled: false };
     this.activeProcesses.set(run.runId, procRecord);
+    callbacks.onProcessGroupPid?.(pgid);
 
     let stdoutBuffer = '';
     let seq = run.lastSequence;
@@ -418,60 +435,67 @@ export class ClaudeDriver implements AgentDriver {
       }
 
       run.exitCode = code;
-      run.verifiedStoppedAt = new Date().toISOString();
-      run.verificationMethod = 'process_group_empty';
 
-      if (procRecord.wasCancelled) {
-        run.status = 'cancelled';
-        if (!terminalEventEmitted) {
+      void (async () => {
+        // Never fabricate proof: the child process closing is not the same
+        // as the process group being confirmed empty (LC-05c-p).
+        const result = await verifyNaturalStop(pgid);
+        stampVerifiedStop(run, result);
+
+        if (procRecord.wasCancelled) {
+          run.status = result.verifiedStopped ? 'cancelled' : 'uncertain';
+          if (!terminalEventEmitted) {
+            seq += 1;
+            callbacks.onEvent({
+              runId: run.runId,
+              sequence: seq,
+              type: 'cancelled',
+              timestamp: new Date().toISOString(),
+              data: {},
+            });
+          }
+        } else if (!result.verifiedStopped) {
+          run.status = 'uncertain';
+        } else if (terminalEventEmitted) {
+          run.status = code === 0 && terminalType !== 'failed' ? 'done' : 'error';
+        } else if (code === 0) {
+          run.status = 'done';
           seq += 1;
           callbacks.onEvent({
             runId: run.runId,
             sequence: seq,
-            type: 'cancelled',
+            type: 'completed',
             timestamp: new Date().toISOString(),
-            data: {},
+            data: {
+              summary: lastAgentMessage || 'Task completed',
+            },
+          });
+        } else {
+          run.status = 'error';
+          seq += 1;
+          callbacks.onEvent({
+            runId: run.runId,
+            sequence: seq,
+            type: 'failed',
+            timestamp: new Date().toISOString(),
+            data: {
+              errorCode: 'AGENT_ERROR',
+              message: `Claude process exited with code ${code}`,
+            },
           });
         }
-      } else if (terminalEventEmitted) {
-        run.status = code === 0 && terminalType !== 'failed' ? 'done' : 'error';
-      } else if (code === 0) {
-        run.status = 'done';
-        seq += 1;
-        callbacks.onEvent({
-          runId: run.runId,
-          sequence: seq,
-          type: 'completed',
-          timestamp: new Date().toISOString(),
-          data: {
-            summary: lastAgentMessage || 'Task completed',
-          },
-        });
-      } else {
-        run.status = 'error';
-        seq += 1;
-        callbacks.onEvent({
-          runId: run.runId,
-          sequence: seq,
-          type: 'failed',
-          timestamp: new Date().toISOString(),
-          data: {
-            errorCode: 'AGENT_ERROR',
-            message: `Claude process exited with code ${code}`,
-          },
-        });
-      }
 
-      try {
-        appendFileSync(
-          run.logPath,
-          `[${new Date().toISOString()}] Claude process stopped: exitCode=${code} status=${run.status}\n`,
-        );
-      } catch {
-        // ignore
-      }
+        try {
+          appendFileSync(
+            run.logPath,
+            `[${new Date().toISOString()}] Claude process stopped: exitCode=${code} status=${run.status}\n`,
+          );
+        } catch {
+          // ignore
+        }
 
-      callbacks.onEnd();
+        callbacks.onEnd();
+      })();
     });
   }
 
@@ -487,9 +511,8 @@ export class ClaudeDriver implements AgentDriver {
     active.wasCancelled = true;
     const result = await terminateProcessGroup(active.pgid, 1000, 500);
 
-    run.verifiedStoppedAt = new Date().toISOString();
-    run.verificationMethod = result.verificationMethod;
-    run.status = 'cancelled';
+    stampVerifiedStop(run, result);
+    run.status = result.verifiedStopped ? 'cancelled' : 'uncertain';
 
     return result;
   }

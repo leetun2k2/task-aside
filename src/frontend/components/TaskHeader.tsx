@@ -2,6 +2,15 @@
 import type { Repository, Task } from '../../contracts/task.ts';
 import { PriorityBadge, StatusBadge } from './ui/Badge.tsx';
 import { Button } from './ui/Button.tsx';
+import {
+  IconAlertTriangle,
+  IconArrowLeft,
+  IconBan,
+  IconCornerDownRight,
+  IconGitBranch,
+  IconPencil,
+  IconRotateCw,
+} from './ui/Icons.tsx';
 
 interface TaskHeaderProps {
   task: Task;
@@ -28,7 +37,7 @@ export function TaskHeader({
   onRetry,
   isActionLoading = false,
 }: TaskHeaderProps) {
-  const repoName = repository ? repository.name : task.repoId;
+  const repoName = repository ? repository.name : (task.repoId ?? 'Auto');
   const canCancel =
     task.status === 'todo' ||
     task.status === 'processing' ||
@@ -50,7 +59,8 @@ export function TaskHeader({
               title="Back to tasks list"
               aria-label="Back to tasks list"
             >
-              ← Tasks
+              <IconArrowLeft size={14} style={{ marginRight: '4px' }} />
+              <span>Tasks</span>
             </Button>
           )}
           <PriorityBadge priority={task.priority} />
@@ -72,7 +82,8 @@ export function TaskHeader({
                 disabled={isActionLoading}
                 title="Edit task title, description, or priority"
               >
-                Edit
+                <IconPencil size={13} style={{ marginRight: '5px' }} />
+                <span>Edit</span>
               </Button>
             )}
 
@@ -85,7 +96,8 @@ export function TaskHeader({
                 disabled={isActionLoading}
                 title="Retry failed task"
               >
-                Retry
+                <IconRotateCw size={13} style={{ marginRight: '5px' }} />
+                <span>Retry</span>
               </Button>
             )}
 
@@ -97,7 +109,8 @@ export function TaskHeader({
                 disabled={isActionLoading}
                 title="Cancel task"
               >
-                Cancel
+                <IconBan size={13} style={{ marginRight: '5px' }} />
+                <span>Cancel</span>
               </Button>
             )}
           </div>
@@ -109,16 +122,7 @@ export function TaskHeader({
           className="task-header-repo"
           title={repository?.canonicalPath ?? repository?.displayPath ?? repoName}
         >
-          <svg
-            className="icon-repo"
-            viewBox="0 0 16 16"
-            width="14"
-            height="14"
-            fill="currentColor"
-            aria-hidden="true"
-          >
-            <path d="M2 2.5A2.5 2.5 0 0 1 4.5 0h8.75a.75.75 0 0 1 .75.75v12.5a.75.75 0 0 1-.75.75h-2.5a.75.75 0 0 1 0-1.5h1.75v-2h-8a1 1 0 0 0-.714 1.7.75.75 0 1 1-1.072 1.05A2.495 2.495 0 0 1 2 11.5Zm10.5-1h-8a1 1 0 0 0-1 1v6.708A2.486 2.486 0 0 1 4.5 9h8ZM5 12.25a.25.25 0 0 1 .25-.25h3.5a.25.25 0 0 1 .25.25v3.25a.25.25 0 0 1-.4.2l-1.6-1.2-1.6 1.2a.25.25 0 0 1-.4-.2Z" />
-          </svg>
+          <IconGitBranch size={14} className="icon-repo" />
           <span>{repoName}</span>
         </span>
 
@@ -131,7 +135,11 @@ export function TaskHeader({
             }}
             title={`Go to parent task #${task.parentId}`}
           >
-            ↳ Parent: #{task.parentId}
+            <IconCornerDownRight
+              size={13}
+              style={{ marginRight: '4px', verticalAlign: 'middle' }}
+            />
+            <span>Parent: #{task.parentId}</span>
             {parentTask ? ` (${parentTask.title})` : ''}
           </button>
         )}
@@ -139,7 +147,7 @@ export function TaskHeader({
 
       {task.blockedReason && (
         <div className="task-header-blocked-alert" role="alert">
-          <span className="alert-icon">⚠️</span>
+          <IconAlertTriangle size={16} className="alert-icon" />
           <div className="alert-content">
             <strong>Blocked:</strong> {task.blockedReason}
             {task.blockedOnChildIds && task.blockedOnChildIds.length > 0 && (

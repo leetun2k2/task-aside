@@ -53,6 +53,11 @@ export interface RunRow {
   cancel_requested_at?: string | null;
   deadline_at?: string | null;
   timeout_requested_at?: string | null;
+  purpose?: 'intake' | 'implementation';
+  admitted_scope?: string | null;
+  input_revision?: number;
+  policy_hash?: string | null;
+  terminal_outcome?: string | null;
 }
 
 export interface ClaimReceiptRow {
@@ -120,7 +125,8 @@ export function requireTask(db: Database, id: string): TaskRecord {
 
 const RUN_COLUMNS = `id, task_id, provider, status, owner_token, lock_generation, process_state,
    pending_input_request_id, started_at, heartbeat_at, ended_at, exit_code,
-   cancel_requested_at, deadline_at, timeout_requested_at`;
+   cancel_requested_at, deadline_at, timeout_requested_at, purpose,
+   admitted_scope, input_revision, policy_hash, terminal_outcome`;
 
 export function getRunById(db: Database, id: string): RunRow | null {
   return db.query(`SELECT ${RUN_COLUMNS} FROM runs WHERE id = ?`).get(id) as RunRow | null;
@@ -150,6 +156,15 @@ export function getLockForRun(db: Database, runId: string): RunLockRow | null {
        FROM run_locks WHERE owner_run_id = ?`,
     )
     .get(runId) as RunLockRow | null;
+}
+
+export function getLocksForRun(db: Database, runId: string): RunLockRow[] {
+  return db
+    .query(
+      `SELECT working_tree_key, owner_run_id, generation, lease_expires_at, quarantined
+       FROM run_locks WHERE owner_run_id = ?`,
+    )
+    .all(runId) as RunLockRow[];
 }
 
 export interface PendingYieldIntent {
@@ -328,6 +343,12 @@ export function getTaskAgentProvider(db: Database, taskId: string): string {
 }
 
 export function requireRepositoryForTask(db: Database, task: TaskRecord): Repository {
+  if (!task.repoId) {
+    throw new DomainError(
+      'INVALID_TRANSITION',
+      `task ${task.id} has no resolved repository yet (stage '${task.stage ?? 'ready'}')`,
+    );
+  }
   const repository = getRepositoryById(db, task.repoId);
   if (!repository) {
     throw new DomainError('NOT_FOUND', `repository not found: ${task.repoId}`);
@@ -372,6 +393,7 @@ export interface RunStatusRecord {
   cancelRequestedAt?: string | null;
   deadlineAt: string;
   timeoutRequestedAt?: string | null;
+  purpose?: 'intake' | 'implementation';
 }
 
 export function getRunStatus(db: Database, runId: string): RunStatusRecord {
@@ -379,6 +401,7 @@ export function getRunStatus(db: Database, runId: string): RunStatusRecord {
   return {
     runId: run.id,
     taskId: run.task_id,
+    purpose: run.purpose ?? 'implementation',
     provider: run.provider,
     cancelRequestedAt: run.cancel_requested_at ?? null,
     deadlineAt: effectiveDeadline(run),

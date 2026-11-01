@@ -34,6 +34,10 @@ export function ensureDataDirs(): void {
   mkdirSync(getLogsDir(), { recursive: true });
 }
 
+export function getLaunchJournalPath(): string {
+  return join(getDataDir(), 'agent-adapter', 'launch-journal.json');
+}
+
 export function getLockFilePath(): string {
   return join(getDataDir(), 'supervisor.json');
 }
@@ -48,6 +52,19 @@ export function getInternalTokenPath(): string {
 
 export function getLogFilePath(serviceName: string): string {
   return join(getLogsDir(), `${serviceName}.log`);
+}
+
+/**
+ * App-owned scratch directory for an Intake attempt (specs/2026-10-25-
+ * message-intake/01-contracts-and-lifecycle.md "Its cwd is an app-owned
+ * scratch directory"; 00-overview.md "Document a narrow constitution
+ * exception for non-writing Intake in an app-owned scratch directory").
+ * Intake never edits a registered repository, so this directory is never a
+ * registered working tree and is created fresh per task so concurrent
+ * Intake attempts cannot see each other's scratch files.
+ */
+export function getIntakeScratchDir(taskId: string): string {
+  return join(getDataDir(), 'intake-scratch', taskId);
 }
 
 export function getDatabasePath(): string {

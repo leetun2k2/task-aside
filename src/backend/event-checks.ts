@@ -179,12 +179,15 @@ async function main(): Promise<void> {
       assert(receipt !== null, 'expected receipt in run_event_receipts');
 
       const { messages } = listMessages(db, task.conversationId);
-      assert(messages.length === 1, `expected 1 message, got ${messages.length}`);
+      // Message-first tasks (specs/2026-10-25-message-intake) always start
+      // with their own initial user message; the agent's reply is the
+      // second message in the conversation, not the first.
+      assert(messages.length === 2, `expected 2 messages, got ${messages.length}`);
       assert(
-        messages[0].content === 'Step 1 completed successfully.',
+        messages[1].content === 'Step 1 completed successfully.',
         'expected message content match',
       );
-      assert(messages[0].sender === 'agent', 'expected sender agent');
+      assert(messages[1].sender === 'agent', 'expected sender agent');
     });
 
     // 3. Identical retry: returns 200 without duplicate message
@@ -212,7 +215,7 @@ async function main(): Promise<void> {
         assert(res.status === 200, `expected 200 identical retry, got ${res.status}`);
 
         const { messages } = listMessages(db, task.conversationId);
-        assert(messages.length === 1, `expected still 1 message, got ${messages.length}`);
+        assert(messages.length === 2, `expected still 2 messages, got ${messages.length}`);
       },
     );
 
@@ -294,8 +297,8 @@ async function main(): Promise<void> {
 
         const { messages } = listMessages(db, task.conversationId);
         assert(
-          messages.length === 2,
-          `expected exactly 2 messages in conversation, got ${messages.length}`,
+          messages.length === 3,
+          `expected exactly 3 messages in conversation, got ${messages.length}`,
         );
       },
     );

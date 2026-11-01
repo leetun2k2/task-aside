@@ -6,12 +6,14 @@ import { fetchSettings, updateSettings } from '../api.ts';
 import { type Theme, useTheme } from '../theme.ts';
 import { Button } from './ui/Button.tsx';
 import { Dialog, DialogClose, DialogContent, DialogHeader, DialogTitle } from './ui/Dialog.tsx';
+import { IconTrash, IconX } from './ui/Icons.tsx';
 
 interface SettingsModalProps {
   isOpen: boolean;
   repositories: Repository[];
   onClose: () => void;
   onAddRepository?: (repo: { name: string; displayPath: string }) => Promise<void>;
+  onRemoveRepository?: (id: string) => Promise<void>;
   onSettingsChanged?: (settings: SettingsResponse) => void;
 }
 
@@ -30,6 +32,7 @@ export function SettingsModal({
   repositories,
   onClose,
   onAddRepository,
+  onRemoveRepository,
   onSettingsChanged,
 }: SettingsModalProps) {
   // Repository state
@@ -37,11 +40,14 @@ export function SettingsModal({
   const [newRepoPath, setNewRepoPath] = useState('');
   const [isAddingRepo, setIsAddingRepo] = useState(false);
   const [repoError, setRepoError] = useState<string | null>(null);
+  const [removingRepoId, setRemovingRepoId] = useState<string | null>(null);
 
   // General settings state
   const [settings, setSettings] = useState<SettingsResponse | null>(null);
-  const [selectedProvider, setSelectedProvider] = useState<Provider>('codex');
+  const [selectedProvider, setSelectedProvider] = useState<Provider>('claude');
+  const [activeHarnesses, setActiveHarnesses] = useState<Provider[]>(['claude', 'codex', 'agy']);
   const [concurrency, setConcurrency] = useState<number>(3);
+  const [rootWorkspace, setRootWorkspace] = useState<string>('');
   const [isLoadingSettings, setIsLoadingSettings] = useState(false);
   const [isSavingSettings, setIsSavingSettings] = useState(false);
   const [settingsMessage, setSettingsMessage] = useState<string | null>(null);
@@ -67,8 +73,10 @@ export function SettingsModal({
         setSettingsError(null);
         const res = await fetchSettings();
         setSettings(res);
-        setSelectedProvider(res.defaultProvider);
+        setSelectedProvider(res.defaultProvider || 'claude');
+        setActiveHarnesses(res.activeHarnesses ?? ['claude', 'codex', 'agy']);
         setConcurrency(res.maxConcurrency);
+        setRootWorkspace(res.rootWorkspace ?? '');
       } catch (err: unknown) {
         setSettingsError(err instanceof Error ? err.message : 'Failed to load settings');
       } finally {
@@ -78,6 +86,23 @@ export function SettingsModal({
 
     void load();
   }, [isOpen]);
+
+  const toggleHarness = (harness: Provider) => {
+    setSettingsError(null);
+    if (activeHarnesses.includes(harness)) {
+      if (activeHarnesses.length <= 1) {
+        setSettingsError('At least one harness tool must remain active');
+        return;
+      }
+      const next = activeHarnesses.filter((h) => h !== harness);
+      setActiveHarnesses(next);
+      if (selectedProvider === harness) {
+        setSelectedProvider(next[0] as Provider);
+      }
+    } else {
+      setActiveHarnesses([...activeHarnesses, harness]);
+    }
+  };
 
   if (!isOpen) return null;
 
@@ -106,6 +131,22 @@ export function SettingsModal({
     }
   };
 
+  const handleRemoveRepo = async (repo: Repository) => {
+    if (!onRemoveRepository) return;
+    const confirmed = window.confirm(`Remove repository "${repo.name}"?`);
+    if (!confirmed) return;
+
+    try {
+      setRemovingRepoId(repo.id);
+      setRepoError(null);
+      await onRemoveRepository(repo.id);
+    } catch (err: unknown) {
+      setRepoError(err instanceof Error ? err.message : 'Failed to remove repository');
+    } finally {
+      setRemovingRepoId(null);
+    }
+  };
+
   const handleSaveSettings = async (e: React.FormEvent) => {
     e.preventDefault();
     try {
@@ -115,6 +156,8 @@ export function SettingsModal({
       const updated = await updateSettings({
         defaultProvider: selectedProvider,
         maxConcurrency: concurrency,
+        rootWorkspace: rootWorkspace.trim() ? rootWorkspace.trim() : null,
+        activeHarnesses,
       });
       setSettings(updated);
       setSettingsMessage('Settings saved successfully');
@@ -145,7 +188,7 @@ export function SettingsModal({
         <DialogHeader>
           <DialogTitle id="settings-title">Settings & Diagnostics</DialogTitle>
           <DialogClose className="modal-close-btn" aria-label="Close">
-            ✕
+            <IconX size={15} />
           </DialogClose>
         </DialogHeader>
 
@@ -168,6 +211,53 @@ export function SettingsModal({
               <div className="settings-loading">Loading settings...</div>
             ) : (
               <form onSubmit={handleSaveSettings} className="settings-form">
+                {/* Active Harness Tools Toggle */}
+                <fieldset
+                  className="form-group"
+                  style={{ marginBottom: '16px', border: 'none', padding: 0, margin: 0 }}
+                >
+                  <legend className="form-label" style={{ marginBottom: '4px' }}>
+                    Active Harness Tools
+                  </legend>
+                  <p
+                    className="form-help-text"
+                    style={{
+                      fontSize: '11px',
+                      color: 'var(--color-text-muted)',
+                      marginBottom: '8px',
+                    }}
+                  >
+                    Toggle which agent harness runners are enabled. At least one must be active.
+                  </p>
+                  <div className="harness-toggle-group">
+                    {[
+                      { id: 'claude' as const, label: 'Claude', desc: 'Claude Code CLI' },
+                      { id: 'codex' as const, label: 'Codex', desc: 'Codex CLI / App Server' },
+                      { id: 'agy' as const, label: 'Agy', desc: 'Antigravity CLI' },
+                    ].map((h) => {
+                      const isActive = activeHarnesses.includes(h.id);
+                      return (
+                        <button
+                          key={h.id}
+                          type="button"
+                          className={`harness-toggle-card ${isActive ? 'harness-toggle-card-active' : ''}`}
+                          onClick={() => toggleHarness(h.id)}
+                          disabled={isSavingSettings}
+                        >
+                          <div className="harness-toggle-indicator" />
+                          <div className="harness-toggle-info">
+                            <span className="harness-toggle-name">{h.label}</span>
+                            <span className="harness-toggle-desc">{h.desc}</span>
+                          </div>
+                          <span className="harness-toggle-status">
+                            {isActive ? 'Active' : 'Inactive'}
+                          </span>
+                        </button>
+                      );
+                    })}
+                  </div>
+                </fieldset>
+
                 <div className="form-row">
                   <div className="form-group form-col">
                     <label htmlFor="settings-provider" className="form-label">
@@ -180,8 +270,15 @@ export function SettingsModal({
                       onChange={(e) => setSelectedProvider(e.target.value as Provider)}
                       disabled={isSavingSettings}
                     >
-                      <option value="codex">Codex (CLI / App Server)</option>
-                      <option value="claude">Claude (Claude Code CLI)</option>
+                      {activeHarnesses.includes('claude') && (
+                        <option value="claude">Claude (Claude Code CLI)</option>
+                      )}
+                      {activeHarnesses.includes('codex') && (
+                        <option value="codex">Codex (CLI / App Server)</option>
+                      )}
+                      {activeHarnesses.includes('agy') && (
+                        <option value="agy">Agy (Antigravity CLI)</option>
+                      )}
                     </select>
                   </div>
 
@@ -211,6 +308,33 @@ export function SettingsModal({
                       Pool cap: active runs are bounded by the 8-slot worker pool.
                     </small>
                   </div>
+                </div>
+
+                <div className="form-group" style={{ marginTop: '12px' }}>
+                  <label htmlFor="settings-root-workspace" className="form-label">
+                    Root Workspace Directory (Safety Sandbox)
+                  </label>
+                  <input
+                    id="settings-root-workspace"
+                    type="text"
+                    className="form-input"
+                    placeholder="e.g. /Users/username/workspace (leave blank for unrestricted)"
+                    value={rootWorkspace}
+                    onChange={(e) => setRootWorkspace(e.target.value)}
+                    disabled={isSavingSettings}
+                  />
+                  <small
+                    className="form-help-text"
+                    style={{
+                      fontSize: '11px',
+                      color: 'var(--color-text-muted, #64748b)',
+                      marginTop: '4px',
+                      display: 'block',
+                    }}
+                  >
+                    Boundary containment: restricts all coding agents and repositories to working
+                    strictly within this folder to safeguard your entire machine.
+                  </small>
                 </div>
 
                 <div className="form-actions-inline">
@@ -271,6 +395,18 @@ export function SettingsModal({
                     <span className="repo-item-provider badge-provider">
                       {repo.defaultProvider}
                     </span>
+                    {onRemoveRepository && (
+                      <button
+                        type="button"
+                        className="repo-item-remove-btn"
+                        onClick={() => handleRemoveRepo(repo)}
+                        disabled={removingRepoId === repo.id}
+                        aria-label={`Remove repository ${repo.name}`}
+                        title="Remove repository"
+                      >
+                        <IconTrash size={14} />
+                      </button>
+                    )}
                   </div>
                 ))
               )}

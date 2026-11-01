@@ -16,6 +16,7 @@ import { mountPublicApi } from '../backend/api/index.ts';
 import { mountInternalRunRoutes } from '../backend/api/runs.ts';
 import { openDatabase } from '../backend/db/connection.ts';
 import { runMigrations } from '../backend/db/migrations.ts';
+import { resolveTaskFromIntake } from '../backend/domains/task/repositories/task-write-repository.ts';
 import { eventHub } from '../backend/events/hub.ts';
 import type { EventEnvelope } from '../contracts/event.ts';
 import type { Task, TaskPriority, TaskStatus } from '../contracts/task.ts';
@@ -286,8 +287,8 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     // 1.2 User creates Task 1 with priority P0 and provider codex
     const taskCodex = await createTask(
       {
+        message: 'Implement login and session tokens for user authentication',
         title: 'Build Authentication Module with Codex',
-        description: 'Implement login and session tokens for user authentication',
         repoId: repo1.id,
         priority: 'P0',
       },
@@ -295,6 +296,17 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     );
     assert(taskCodex.status === 'todo', 'taskCodex initial status must be todo');
     assert(taskCodex.priority === 'P0', 'taskCodex priority must be P0');
+
+    resolveTaskFromIntake(db, {
+      id: taskCodex.id,
+      title: taskCodex.title,
+      priority: 'P0',
+      primaryRepoId: repo1.id,
+      resolvedRepoIds: [repo1.id],
+      executionProvider: 'codex',
+      intakeResultJson: JSON.stringify({ test: true }),
+      updatedAt: new Date().toISOString(),
+    });
 
     // 1.3 Engine schedules and dispatches taskCodex
     const claimCodex = await scheduler.scheduleNext();
@@ -337,10 +349,14 @@ export async function runLiveWorkflowChecks(): Promise<void> {
       baseUrl: backendUrl,
       token: browserToken,
     });
-    assert(msgsCodex.messages.length === 1, 'conversation must contain 1 message');
-    assert(msgsCodex.messages[0].sender === 'agent', 'message sender must be agent');
     assert(
-      msgsCodex.messages[0].content === 'Codex completed project task cleanly.',
+      msgsCodex.messages.length === 2,
+      'conversation must contain 2 messages (initial user message + agent)',
+    );
+    assert(msgsCodex.messages[0].sender === 'user', 'first message sender must be user');
+    assert(msgsCodex.messages[1].sender === 'agent', 'second message sender must be agent');
+    assert(
+      msgsCodex.messages[1].content === 'Codex completed project task cleanly.',
       'message content must match',
     );
     console.log('✓ Codex live user workflow passed');
@@ -362,13 +378,24 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     // 2.1 User creates Task 2 with provider claude
     const taskClaude = await createTask(
       {
+        message: 'Draft OpenAPI 3.1 schema and endpoints',
         title: 'Design API Schema with Claude',
-        description: 'Draft OpenAPI 3.1 schema and endpoints',
         repoId: repo2.id,
         priority: 'P0',
       },
       { baseUrl: backendUrl, token: browserToken },
     );
+
+    resolveTaskFromIntake(db, {
+      id: taskClaude.id,
+      title: taskClaude.title,
+      priority: 'P0',
+      primaryRepoId: repo2.id,
+      resolvedRepoIds: [repo2.id],
+      executionProvider: 'claude',
+      intakeResultJson: JSON.stringify({ test: true }),
+      updatedAt: new Date().toISOString(),
+    });
 
     // 2.2 Turn 1 execution: Pins sessionId
     const claimClaude = await scheduler.scheduleNext();
@@ -425,8 +452,8 @@ export async function runLiveWorkflowChecks(): Promise<void> {
       baseUrl: backendUrl,
       token: browserToken,
     });
-    // Turn 1 agent message + followup user message
-    assert(msgsClaude.messages.length === 2, 'claude task must have 2 messages');
+    // Initial user message + Turn 1 agent message + followup user message
+    assert(msgsClaude.messages.length === 3, 'claude task must have 3 messages');
     console.log('✓ Claude live user workflow and session resume passed');
 
     // =========================================================================
@@ -436,12 +463,24 @@ export async function runLiveWorkflowChecks(): Promise<void> {
 
     const taskHitl = await createTask(
       {
+        message: 'Database Migration Planning (HITL)',
         title: 'Database Migration Planning (HITL)',
         repoId: repo1.id,
         priority: 'P1',
       },
       { baseUrl: backendUrl, token: browserToken },
     );
+
+    resolveTaskFromIntake(db, {
+      id: taskHitl.id,
+      title: taskHitl.title,
+      priority: 'P1',
+      primaryRepoId: repo1.id,
+      resolvedRepoIds: [repo1.id],
+      executionProvider: 'codex',
+      intakeResultJson: JSON.stringify({ test: true }),
+      updatedAt: new Date().toISOString(),
+    });
 
     const requestId = `req_hitl_workflow_${Date.now()}`;
     const runHitlId = `run_hitl_${Date.now()}`;
@@ -518,6 +557,7 @@ export async function runLiveWorkflowChecks(): Promise<void> {
 
     const rootTask = await createTask(
       {
+        message: 'Parent Task: Refactor Navigation Bar',
         title: 'Parent Task: Refactor Navigation Bar',
         repoId: repo1.id,
         priority: 'P1',
@@ -529,6 +569,7 @@ export async function runLiveWorkflowChecks(): Promise<void> {
 
     const childTask1 = await createTask(
       {
+        message: 'Child Task 1: Dropdown Menu Component',
         title: 'Child Task 1: Dropdown Menu Component',
         repoId: repo1.id,
         priority: 'P2',
@@ -655,7 +696,7 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     console.log('6. Checking Settings Modal, Providers, Concurrency & Diagnostics...');
 
     const initialSettings = await fetchSettings({ baseUrl: backendUrl, token: browserToken });
-    assert(initialSettings.defaultProvider === 'codex', 'initial provider must be codex');
+    assert(initialSettings.defaultProvider === 'claude', 'initial provider must be claude');
     assert(initialSettings.maxConcurrency === 8, 'initial maxConcurrency must be 8');
     assert(initialSettings.diagnostics.service === 'backend', 'service diagnostic must be backend');
     assert(
@@ -664,17 +705,17 @@ export async function runLiveWorkflowChecks(): Promise<void> {
     );
     assert(initialSettings.diagnostics.tasksCount >= 3, 'tasksCount must reflect created tasks');
 
-    // Update settings: change to claude, concurrency 6
+    // Update settings: change to agy, concurrency 6
     const updatedSettings = await updateSettings(
-      { defaultProvider: 'claude', maxConcurrency: 6 },
+      { defaultProvider: 'agy', maxConcurrency: 6 },
       { baseUrl: backendUrl, token: browserToken },
     );
-    assert(updatedSettings.defaultProvider === 'claude', 'updated provider must be claude');
+    assert(updatedSettings.defaultProvider === 'agy', 'updated provider must be agy');
     assert(updatedSettings.maxConcurrency === 6, 'updated maxConcurrency must be 6');
 
     // Refetch to verify SQLite persistence
     const refetchedSettings = await fetchSettings({ baseUrl: backendUrl, token: browserToken });
-    assert(refetchedSettings.defaultProvider === 'claude', 'refetched provider must be claude');
+    assert(refetchedSettings.defaultProvider === 'agy', 'refetched provider must be agy');
     assert(refetchedSettings.maxConcurrency === 6, 'refetched maxConcurrency must be 6');
 
     // Duplicate repository registration rejected with 409

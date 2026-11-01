@@ -105,7 +105,15 @@ export class TaskScheduler {
 
   recordActiveRun(run: ActiveRun): void {
     this.activeRuns.set(run.runId, run);
-    this.activeWorkingTrees.set(run.workingTreeKey, run.runId);
+    const keys =
+      run.workingTreeKeys && run.workingTreeKeys.length > 0
+        ? run.workingTreeKeys
+        : [run.workingTreeKey];
+    for (const key of keys) {
+      if (key) {
+        this.activeWorkingTrees.set(key, run.runId);
+      }
+    }
     this.activeTaskIds.add(run.taskId);
   }
 
@@ -115,7 +123,15 @@ export class TaskScheduler {
       return false;
     }
     this.activeRuns.delete(runId);
-    this.activeWorkingTrees.delete(run.workingTreeKey);
+    const keys =
+      run.workingTreeKeys && run.workingTreeKeys.length > 0
+        ? run.workingTreeKeys
+        : [run.workingTreeKey];
+    for (const key of keys) {
+      if (key) {
+        this.activeWorkingTrees.delete(key);
+      }
+    }
     this.activeTaskIds.delete(run.taskId);
     return true;
   }
@@ -161,7 +177,13 @@ export class TaskScheduler {
     let workingTreeKey = res.workingTreeKey;
     if (!workingTreeKey) {
       const context = await this.client.getTaskContext(taskId);
-      workingTreeKey = context.repository.canonicalPath;
+      // An Intake attempt (specs/2026-10-25-message-intake) has no resolved
+      // repository and claims no working-tree lock; a synthetic per-task key
+      // just keeps this scheduler's own in-memory bookkeeping (concurrency
+      // count, active-task set) consistent without colliding with any real
+      // repo's canonical path — two Intake attempts never contend with each
+      // other, only the shared slot cap applies.
+      workingTreeKey = context.repository?.canonicalPath ?? `intake-scratch:${taskId}`;
     }
 
     const repoId = res.taskSnapshot.repoId || '';
@@ -169,10 +191,18 @@ export class TaskScheduler {
       this.repoTreeCache.set(repoId, workingTreeKey);
     }
 
+    const workingTreeKeys =
+      res.writeRoots && res.writeRoots.length > 0
+        ? res.writeRoots
+        : workingTreeKey
+          ? [workingTreeKey]
+          : [];
+
     const activeRun: ActiveRun = {
       runId: res.runId,
       taskId,
       workingTreeKey,
+      workingTreeKeys,
       generation: res.generation,
       priority: res.taskSnapshot.priority,
       startedAt: new Date().toISOString(),

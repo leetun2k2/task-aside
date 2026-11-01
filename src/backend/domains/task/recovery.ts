@@ -9,7 +9,6 @@ import type {
 import { DomainError } from '../../errors.ts';
 import { eventHub } from '../../events/hub.ts';
 import {
-  LEASE_DURATION_MS,
   TERMINAL_RUN_STATUSES,
   assertFencingMatches,
   getLockForRun,
@@ -17,28 +16,12 @@ import {
   requireRun,
 } from './runs.ts';
 import { getTaskById, reconcileBlockedParents } from './tasks.ts';
+import { heartbeatUsecase } from './usecases/heartbeat-usecase.ts';
 
+// Forwarding export (LC-05b): logic moved to heartbeat-usecase.ts; kept here
+// so existing callers of recovery.ts/runs.ts don't need to change.
 export function heartbeat(db: Database, runId: string, request: HeartbeatRequest): { ok: true } {
-  const run = requireRun(db, runId);
-  assertFencingMatches(run, request.ownerId, request.generation);
-
-  const lock = getLockForRun(db, runId);
-  if (!lock || lock.generation !== request.generation) {
-    throw new DomainError('STALE_GENERATION', `lock generation mismatch for run ${runId}`);
-  }
-
-  const now = new Date().toISOString();
-  const leaseExpiresAt = new Date(Date.now() + LEASE_DURATION_MS).toISOString();
-
-  const applyAtomically = db.transaction(() => {
-    db.query('UPDATE runs SET heartbeat_at = ? WHERE id = ?').run(now, runId);
-    db.query(
-      'UPDATE run_locks SET lease_expires_at = ?, updated_at = ? WHERE working_tree_key = ?',
-    ).run(leaseExpiresAt, now, lock.working_tree_key);
-  });
-  applyAtomically();
-
-  return { ok: true };
+  return heartbeatUsecase(db, runId, request);
 }
 
 export function finalizeRun(
@@ -48,6 +31,13 @@ export function finalizeRun(
 ): { ok: true } {
   const run = requireRun(db, runId);
   assertFencingMatches(run, request.ownerId, request.generation);
+
+  if (run.purpose === 'intake' && request.status === 'done') {
+    throw new DomainError(
+      'INVALID_TRANSITION',
+      'Intake runs cannot be finalized via generic finalize as done; use commitIntakeResult or failIntake',
+    );
+  }
 
   // Idempotency guard: a run already finalized to a terminal status must not
   // be re-finalized.
@@ -114,11 +104,15 @@ export function finalizeRun(
       ).run(request.status, now, run.task_id);
     }
 
+    // Release ownership on all locks held by this run, never resetting generation
+    db.query("UPDATE run_locks SET owner_run_id = '', updated_at = ? WHERE owner_run_id = ?").run(
+      now,
+      runId,
+    );
     if (lock) {
-      // Release ownership but never reset generation
       db.query(
-        'UPDATE run_locks SET owner_run_id = ?, updated_at = ? WHERE working_tree_key = ?',
-      ).run('', now, lock.working_tree_key);
+        "UPDATE run_locks SET owner_run_id = '', updated_at = ? WHERE working_tree_key = ?",
+      ).run(now, lock.working_tree_key);
     }
   });
   applyAtomically();
@@ -166,12 +160,29 @@ export function markUncertain(
 
   const applyAtomically = db.transaction(() => {
     db.query("UPDATE runs SET status = 'uncertain' WHERE id = ?").run(runId);
+    db.query(
+      `UPDATE run_locks
+       SET quarantined = 1, quarantined_reason = ?, quarantined_at = ?, updated_at = ?
+       WHERE owner_run_id = ?`,
+    ).run(request.reason, now, now, runId);
     if (lock) {
       db.query(
         `UPDATE run_locks
          SET quarantined = 1, quarantined_reason = ?, quarantined_at = ?, updated_at = ?
          WHERE working_tree_key = ?`,
       ).run(request.reason, now, now, lock.working_tree_key);
+    }
+    if (run.admitted_scope) {
+      try {
+        const paths = JSON.parse(run.admitted_scope) as string[];
+        for (const p of paths) {
+          db.query(
+            `UPDATE run_locks
+             SET quarantined = 1, quarantined_reason = ?, quarantined_at = ?, updated_at = ?
+             WHERE working_tree_key = ?`,
+          ).run(request.reason, now, now, p);
+        }
+      } catch {}
     }
   });
   applyAtomically();
@@ -194,12 +205,29 @@ export function clearQuarantine(
   const now = new Date().toISOString();
 
   const applyAtomically = db.transaction(() => {
-    if (lock) {
+    db.query(
+      `UPDATE run_locks
+       SET quarantined = 0, quarantined_reason = NULL, quarantined_at = NULL, owner_run_id = '', updated_at = ?
+       WHERE owner_run_id = ?`,
+    ).run(now, runId);
+    if (lock && (lock.owner_run_id === runId || lock.owner_run_id === '')) {
       db.query(
         `UPDATE run_locks
          SET quarantined = 0, quarantined_reason = NULL, quarantined_at = NULL, owner_run_id = '', updated_at = ?
-         WHERE working_tree_key = ?`,
-      ).run(now, lock.working_tree_key);
+         WHERE working_tree_key = ? AND (owner_run_id = ? OR owner_run_id = '')`,
+      ).run(now, lock.working_tree_key, runId);
+    }
+    if (run.admitted_scope) {
+      try {
+        const paths = JSON.parse(run.admitted_scope) as string[];
+        for (const p of paths) {
+          db.query(
+            `UPDATE run_locks
+             SET quarantined = 0, quarantined_reason = NULL, quarantined_at = NULL, owner_run_id = '', updated_at = ?
+             WHERE working_tree_key = ? AND (owner_run_id = ? OR owner_run_id = '')`,
+          ).run(now, p, runId);
+        }
+      } catch {}
     }
     db.query("UPDATE runs SET status = 'cancelled' WHERE id = ? AND status = 'uncertain'").run(
       runId,

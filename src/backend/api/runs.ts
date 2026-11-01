@@ -7,6 +7,7 @@ import type { Hono } from 'hono';
 import { z } from 'zod';
 import { CreateMessageInputSchema } from '../../contracts/chat.ts';
 import { IngestEventsRequestSchema } from '../../contracts/event.ts';
+import { CommitIntakeResultRequestSchema, FailIntakeRequestSchema } from '../../contracts/intake.ts';
 import {
   AdmitTaskRequestSchema,
   ClaimTaskRequestSchema,
@@ -16,18 +17,21 @@ import {
   VerificationMethodSchema,
 } from '../../contracts/run.ts';
 import { internalAuth } from '../../supervisor/auth.ts';
-import { appendMessage, getConversationIdForTask } from '../domains/chat/messages.ts';
-import { admitNextEligibleTask, claimTask, listRunnableTasks } from '../domains/task/admission.ts';
+import { getConversationIdForTask } from '../domains/chat/messages.ts';
+import { appendMessageUsecase } from '../domains/chat/usecases/append-message-usecase.ts';
 import { getTaskContext } from '../domains/task/context.ts';
-import { ingestEvents } from '../domains/task/events.ts';
-import {
-  clearQuarantine,
-  finalizeRun,
-  heartbeat,
-  markUncertain,
-} from '../domains/task/recovery.ts';
+import { clearQuarantine, finalizeRun, markUncertain } from '../domains/task/recovery.ts';
 import { getRunStatus, listActiveRuns, requestTimeout } from '../domains/task/runs.ts';
+import { admitNextTaskUsecase } from '../domains/task/usecases/admit-next-task-usecase.ts';
+import { claimTaskUsecase } from '../domains/task/usecases/claim-task-usecase.ts';
+import {
+  commitIntakeResultUsecase,
+  failIntakeUsecase,
+} from '../domains/task/usecases/commit-intake-result-usecase.ts';
+import { heartbeatUsecase } from '../domains/task/usecases/heartbeat-usecase.ts';
+import { listRunnableTasksUsecase } from '../domains/task/usecases/list-runnable-tasks-usecase.ts';
 import { mintManagedMcpToken } from '../mcp/tokens.ts';
+import { ingestEventsUsecase } from '../usecases/ingest-events-usecase.ts';
 import { DomainError } from './errors.ts';
 
 // Deliberately not the refined `FinalizeRunRequestSchema`: that schema's
@@ -48,7 +52,7 @@ const FinalizeRequestBodySchema = z.object({
 });
 
 export function mountInternalRunRoutes(app: Hono, db: Database): void {
-  app.get('/internal/v1/tasks/runnable', (c) => c.json(listRunnableTasks(db)));
+  app.get('/internal/v1/tasks/runnable', (c) => c.json(listRunnableTasksUsecase(db)));
 
   // Startup reconciliation feed: runs still 'running'/'hitl' in the database,
   // independent of any in-process engine state (specs/2026-10-24-handoff
@@ -62,7 +66,7 @@ export function mountInternalRunRoutes(app: Hono, db: Database): void {
     if (!parsed.success) {
       throw new DomainError('VALIDATION_ERROR', 'invalid claim request', parsed.error.flatten());
     }
-    return c.json(claimTask(db, c.req.param('id'), parsed.data));
+    return c.json(claimTaskUsecase(db, c.req.param('id'), parsed.data));
   });
 
   // Atomic bulk admission (specs/2026-10-24-polling-worker-pool.md): the
@@ -76,7 +80,7 @@ export function mountInternalRunRoutes(app: Hono, db: Database): void {
     if (!parsed.success) {
       throw new DomainError('VALIDATION_ERROR', 'invalid admit request', parsed.error.flatten());
     }
-    return c.json(admitNextEligibleTask(db, parsed.data));
+    return c.json(admitNextTaskUsecase(db, parsed.data));
   });
 
   app.get('/internal/v1/tasks/:id/context', (c) => c.json(getTaskContext(db, c.req.param('id'))));
@@ -91,7 +95,7 @@ export function mountInternalRunRoutes(app: Hono, db: Database): void {
         parsed.error.flatten(),
       );
     }
-    return c.json(heartbeat(db, c.req.param('id'), parsed.data));
+    return c.json(heartbeatUsecase(db, c.req.param('id'), parsed.data));
   });
 
   app.post('/internal/v1/runs/:id/finalize', async (c) => {
@@ -160,7 +164,7 @@ export function mountInternalRunRoutes(app: Hono, db: Database): void {
       throw new DomainError('VALIDATION_ERROR', 'invalid event envelope', parsed.error.flatten());
     }
 
-    const result = ingestEvents(db, runId, parsed.data);
+    const result = ingestEventsUsecase(db, runId, parsed.data);
 
     // Header hook for deterministic dropped-ACK testing
     if (c.req.header('x-simulate-lost-ack') === 'true') {
@@ -181,11 +185,16 @@ export function mountInternalRunRoutes(app: Hono, db: Database): void {
     if (!parsed.success) {
       throw new DomainError('VALIDATION_ERROR', 'invalid message input', parsed.error.flatten());
     }
-    const message = appendMessage(db, conversationId, parsed.data, 'user');
+    const message = appendMessageUsecase(
+      db,
+      conversationId,
+      { ...parsed.data, targetTaskId: taskId },
+      'user',
+    );
     return c.json({ ok: true, message });
   });
 
-  app.post('/internal/v1/runs/:id/mcp-token', (c) => {
+  app.post('/internal/v1/runs/:id/mcp-token', async (c) => {
     const runId = c.req.param('id');
     const runRow = db.query('SELECT task_id FROM runs WHERE id = ?').get(runId) as {
       task_id: string;
@@ -193,6 +202,37 @@ export function mountInternalRunRoutes(app: Hono, db: Database): void {
     if (!runRow) {
       throw new DomainError('NOT_FOUND', `run not found: ${runId}`);
     }
-    return c.json(mintManagedMcpToken(db, runId, runRow.task_id), 201);
+    const body = (await c.req.json().catch(() => ({}))) as { toolProfile?: 'intake' | 'full' };
+    return c.json(mintManagedMcpToken(db, runId, runRow.task_id, body.toolProfile), 201);
+  });
+
+  // Engine-only, fenced, idempotent Intake result acceptance (specs/2026-10
+  // -25-message-intake/01-contracts-and-lifecycle.md "Internal Intake result
+  // commit"). Called only after the Intake attempt's process tree is
+  // verified stopped.
+  app.post('/internal/v1/runs/:id/intake-result', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = CommitIntakeResultRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        'invalid intake result commit request',
+        parsed.error.flatten(),
+      );
+    }
+    return c.json(commitIntakeResultUsecase(db, c.req.param('id'), parsed.data));
+  });
+
+  app.post('/internal/v1/runs/:id/intake-failed', async (c) => {
+    const body = await c.req.json().catch(() => null);
+    const parsed = FailIntakeRequestSchema.safeParse(body);
+    if (!parsed.success) {
+      throw new DomainError(
+        'VALIDATION_ERROR',
+        'invalid intake-failed request',
+        parsed.error.flatten(),
+      );
+    }
+    return c.json(failIntakeUsecase(db, c.req.param('id'), parsed.data));
   });
 }

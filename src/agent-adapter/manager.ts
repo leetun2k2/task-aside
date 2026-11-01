@@ -1,18 +1,23 @@
 // Adapter run manager (SPECIFICATION.md §2, §3; ARCHITECTURE.md §6; TASKS.md T16, T17).
+import { randomUUID } from 'node:crypto';
 import { appendFileSync, existsSync, mkdirSync } from 'node:fs';
 import { join } from 'node:path';
-import type {
-  CancelRunRequest,
-  EventEnvelope,
-  ProvideInputRequest,
-  Provider,
-  RunStatusResponse,
-  StartRunRequest,
+import {
+  type CancelRunRequest,
+  type EventEnvelope,
+  type IntakeResult,
+  IntakeResultSchema,
+  type ProvideInputRequest,
+  type Provider,
+  type RunOutcome,
+  type RunStatusResponse,
+  type StartRunRequest,
 } from '../contracts/index.ts';
 import { getLogsDir } from '../supervisor/paths.ts';
+import { AgyDriver } from './drivers/agy.ts';
 import { ClaudeDriver } from './drivers/claude.ts';
 import { CodexDriver } from './drivers/codex.ts';
-import type { AgentDriver, DriverCallbacks } from './drivers/types.ts';
+import type { AgentDriver, DriverCallbacks, DriverCancelResult } from './drivers/types.ts';
 import {
   AdapterError,
   NotFoundError,
@@ -22,21 +27,103 @@ import {
 } from './errors.ts';
 import { MAX_EVENT_BUFFER, RunEventStream } from './event-stream.ts';
 import { DEFAULT_MAX_LOG_SIZE_BYTES, formatRunLogLine, writeRunLog } from './logging.ts';
+import {
+  resetLaunchProof,
+  stampVerifiedStop,
+  verifyNaturalStop,
+} from './services/run-stop-service.ts';
+import {
+  type LaunchRecord,
+  computePayloadHash,
+  getActiveLaunch,
+  loadJournal,
+  recordLaunchStarted,
+  recordLaunchStopped,
+} from './state/launch-journal.ts';
 import type { AdapterRun, FakeScenario } from './types.ts';
+
+/**
+ * Deterministic-test helper only (specs/2026-10-25-message-intake): the
+ * fake 'success' scenario has no real model to ask, so for an Intake
+ * dispatch (recognizable by its scratch cwd — see supervisor/paths.ts
+ * getIntakeScratchDir) it must still produce one schema-valid final JSON
+ * result instead of generic prose, or every deterministic check that
+ * creates a task and expects it to reach real implementation dispatch
+ * would hang at the Intake gate. It parses the rendered routing
+ * instruction (src/execution-engine/instruction-builder.ts
+ * buildIntakeInstruction) for the submitted title/priority overrides and
+ * the first authorized repository id, and always resolves `action:
+ * 'implement'` with that single repo — multi-repo/delegate/request_input
+ * fake-success behavior is not synthesized here. This never runs against a
+ * real provider driver.
+ */
+function synthesizeFakeIntakeResultContent(instruction: string): string | null {
+  const catalogBlock = instruction.match(/## Authorized repository catalog\n([\s\S]*?)\n\n/);
+  const allAuthorizedIds = catalogBlock
+    ? [...catalogBlock[1].matchAll(/- `([^`]+)`/g)].map((m) => m[1])
+    : [];
+  if (allAuthorizedIds.length === 0) {
+    return null;
+  }
+  // Prefer the first submitted repo hint that is also authorized, so two
+  // concurrently-dispatched Intake attempts with different hints resolve to
+  // different repos instead of colliding on whichever repo happens to be
+  // listed first in the catalog.
+  const hintsMatch = instruction.match(/\*\*Repo hints\*\*: (.+)/);
+  const hintedIds =
+    hintsMatch && !hintsMatch[1].startsWith('*(none')
+      ? hintsMatch[1].split(',').map((s) => s.trim())
+      : [];
+  const repoId = hintedIds.find((id) => allAuthorizedIds.includes(id)) ?? allAuthorizedIds[0];
+
+  const titleMatch = instruction.match(/\*\*Submitted title\*\*: (.+)/);
+  const title =
+    titleMatch && !titleMatch[1].startsWith('*(none')
+      ? titleMatch[1].trim()
+      : 'Fake adapter resolved task';
+
+  const priorityMatch = instruction.match(/\*\*Submitted priority\*\*: (P[0-3])\b/);
+  const priority = priorityMatch ? priorityMatch[1] : 'P2';
+
+  return JSON.stringify({
+    version: 1,
+    action: 'implement',
+    title,
+    repoIds: [repoId],
+    priority,
+    executionProvider: 'claude',
+    goal: 'Fake adapter synthesized this result for deterministic testing.',
+  });
+}
 
 export class AdapterRunManager {
   private runs = new Map<string, AdapterRun>();
   private drivers = new Map<Provider, AgentDriver>();
   private maxLogSizeBytes: number;
+  private journalPath: string | undefined;
+  // Launches recorded as 'active' in the journal that this process instance
+  // never spawned itself (left over from a crash/restart). A respawn for the
+  // same runId is refused until the launch is resolved (verified stopped via
+  // cancelRun, which clears the journal entry).
+  private unresolvedLaunches: Map<string, LaunchRecord>;
 
   constructor(options?: {
     codexDriver?: AgentDriver;
     claudeDriver?: AgentDriver;
+    agyDriver?: AgentDriver;
     maxLogSizeBytes?: number;
+    journalPath?: string;
   }) {
     this.drivers.set('codex', options?.codexDriver ?? new CodexDriver());
     this.drivers.set('claude', options?.claudeDriver ?? new ClaudeDriver());
+    this.drivers.set('agy', options?.agyDriver ?? new AgyDriver());
     this.maxLogSizeBytes = options?.maxLogSizeBytes ?? DEFAULT_MAX_LOG_SIZE_BYTES;
+    this.journalPath = options?.journalPath;
+    this.unresolvedLaunches = new Map(
+      loadJournal(this.journalPath)
+        .filter((l) => l.status === 'active')
+        .map((l) => [l.runId, l]),
+    );
   }
 
   setDriver(provider: Provider, driver: AgentDriver): void {
@@ -47,6 +134,14 @@ export class AdapterRunManager {
     req: StartRunRequest,
     options?: { scenario?: FakeScenario },
   ): { runId: string; started: boolean; existing?: boolean } {
+    const payloadHash = computePayloadHash({
+      provider: req.provider,
+      cwd: req.cwd,
+      writeRoots: req.writeRoots ?? [],
+      purpose: req.purpose ?? 'implementation',
+      instructionLength: req.instruction.length,
+    });
+
     const existing = this.runs.get(req.runId);
     if (existing) {
       if (existing.ownerId !== req.ownerId || existing.generation !== req.generation) {
@@ -54,8 +149,22 @@ export class AdapterRunManager {
           `Run ${req.runId} exists with owner ${existing.ownerId} and generation ${existing.generation}`,
         );
       }
+      const activeLaunch = getActiveLaunch(req.runId, this.journalPath);
+      if (activeLaunch && activeLaunch.payloadHash !== payloadHash) {
+        throw new AdapterError(
+          'VALIDATION_ERROR',
+          `Repeated start for run ${req.runId} conflicts with the in-flight launch's payload`,
+        );
+      }
       // Repeated start never spawns twice: return existing run info idempotently
       return { runId: req.runId, started: true, existing: true };
+    }
+
+    if (this.unresolvedLaunches.has(req.runId)) {
+      throw new AdapterError(
+        'RUN_UNCERTAIN',
+        `A prior launch for run ${req.runId} was never confirmed stopped; resolve it before starting a new one`,
+      );
     }
 
     if (!existsSync(req.cwd)) {
@@ -68,6 +177,22 @@ export class AdapterRunManager {
         'VALIDATION_ERROR',
         'Codex driver does not support session resume in exec baseline',
       );
+    }
+
+    if (req.purpose === 'intake' && req.provider === 'agy' && !options?.scenario) {
+      throw new AdapterError(
+        'VALIDATION_ERROR',
+        'agy provider does not support Intake tool isolation profile',
+      );
+    }
+
+    if (req.writeRoots && req.writeRoots.length > 1 && !options?.scenario) {
+      if (req.provider !== 'codex' && req.provider !== 'claude') {
+        throw new AdapterError(
+          'VALIDATION_ERROR',
+          `Provider ${req.provider} does not support multi-repo write roots`,
+        );
+      }
     }
 
     const runsLogDir = join(getLogsDir(), 'runs');
@@ -96,16 +221,23 @@ export class AdapterRunManager {
     );
 
     const scenario = options?.scenario;
+    const purpose = req.purpose ?? 'implementation';
+    const writeRoots = req.writeRoots ?? [];
+    const runFence = req.runFence ?? req.generation;
 
     const stream = new RunEventStream(req.runId, MAX_EVENT_BUFFER);
     const run: AdapterRun = {
       runId: req.runId,
       taskId: req.taskId,
+      purpose,
       provider: req.provider,
       cwd: req.cwd,
+      writeRoots,
       instruction: req.instruction,
       ownerId: req.ownerId,
       generation: req.generation,
+      runFence,
+      lockGenerations: req.lockGenerations,
       sessionId: req.sessionId,
       mcp: req.mcp,
       scenario,
@@ -142,7 +274,7 @@ export class AdapterRunManager {
       const driver = this.drivers.get(req.provider);
       if (driver) {
         Promise.resolve()
-          .then(() => driver.start(run, this.bindDriverCallbacks(run)))
+          .then(() => driver.start(run, this.bindDriverCallbacks(run, payloadHash)))
           .catch((err: unknown) => this.handleDriverError(run, err));
       } else {
         this.executeScenario(run, 'success');
@@ -156,23 +288,59 @@ export class AdapterRunManager {
     this.emitEvent(run, event);
   }
 
-  private handleDriverEnd(run: AdapterRun): void {
+  private async handleDriverEnd(run: AdapterRun): Promise<void> {
     this.clearDeadlineTimer(run);
     if (run.status === 'running') {
-      run.status = 'done';
-      run.verifiedStoppedAt = new Date().toISOString();
-      run.verificationMethod = 'process_group_empty';
-      run.exitCode = 0;
+      // Fallback for drivers (agy) that don't stamp proof themselves: never
+      // assume the process group is empty just because onEnd fired.
+      const result = await verifyNaturalStop(run.processGroupPid);
+      stampVerifiedStop(run, result);
+      run.status = result.verifiedStopped ? 'done' : 'uncertain';
+      run.exitCode = result.verifiedStopped ? 0 : null;
+    }
+    if (run.verifiedStoppedAt) {
+      recordLaunchStopped(run.runId, this.journalPath);
+    }
+    if (!run.outcome) {
+      let intakeResult: IntakeResult | undefined;
+      if (run.purpose === 'intake') {
+        const lastMsg = [...run.events].reverse().find((e) => e.type === 'message.completed');
+        if (lastMsg && typeof (lastMsg.data as { content?: string })?.content === 'string') {
+          const content = (lastMsg.data as { content: string }).content.trim();
+          try {
+            intakeResult = IntakeResultSchema.parse(JSON.parse(content));
+          } catch {}
+        }
+      }
+      run.outcome = {
+        runId: run.runId,
+        terminalStatus: run.status,
+        intakeResult,
+        summary:
+          run.status === 'done'
+            ? run.purpose === 'intake'
+              ? 'Intake completed'
+              : 'Task completed'
+            : 'Run finished',
+        verifiedStopped: Boolean(run.verifiedStoppedAt),
+        verificationMethod: run.verificationMethod,
+      };
     }
     this.notifyRunEnded(run);
   }
 
-  private handleDriverError(run: AdapterRun, err: unknown): void {
+  private async handleDriverError(run: AdapterRun, err: unknown): Promise<void> {
     this.clearDeadlineTimer(run);
-    run.status = 'error';
-    run.verifiedStoppedAt = new Date().toISOString();
-    run.verificationMethod = 'process_group_empty';
-    run.exitCode = 1;
+    // start() can throw before any process was ever spawned (no pid yet) or
+    // after (pid assigned, then a later synchronous failure) — only the
+    // latter needs a real group-emptiness check.
+    const result = await verifyNaturalStop(run.processGroupPid);
+    stampVerifiedStop(run, result);
+    run.status = result.verifiedStopped ? 'error' : 'uncertain';
+    run.exitCode = result.verifiedStopped ? 1 : null;
+    if (run.verifiedStoppedAt) {
+      recordLaunchStopped(run.runId, this.journalPath);
+    }
     const seq = run.lastSequence + 1;
     this.emitEvent(run, {
       runId: run.runId,
@@ -184,6 +352,15 @@ export class AdapterRunManager {
         message: err instanceof Error ? err.message : String(err),
       },
     });
+    if (!run.outcome) {
+      run.outcome = {
+        runId: run.runId,
+        terminalStatus: run.status,
+        summary: err instanceof Error ? err.message : String(err),
+        verifiedStopped: Boolean(run.verifiedStoppedAt),
+        verificationMethod: run.verificationMethod,
+      };
+    }
     this.notifyRunEnded(run);
   }
 
@@ -191,11 +368,29 @@ export class AdapterRunManager {
     run.sessionId = sid;
   }
 
-  private bindDriverCallbacks(run: AdapterRun): DriverCallbacks {
+  private bindDriverCallbacks(run: AdapterRun, payloadHash: string): DriverCallbacks {
     return {
       onEvent: (event: EventEnvelope) => this.handleDriverEvent(run, event),
-      onEnd: () => this.handleDriverEnd(run),
+      onEnd: () => {
+        void this.handleDriverEnd(run);
+      },
       onSessionId: (sid: string) => this.handleDriverSessionId(run, sid),
+      onProcessGroupPid: (pgid: number) => {
+        resetLaunchProof(run);
+        this.unresolvedLaunches.delete(run.runId);
+        recordLaunchStarted(
+          {
+            launchId: randomUUID(),
+            runId: run.runId,
+            provider: run.provider,
+            payloadHash,
+            pgid,
+            startedAt: new Date().toISOString(),
+            status: 'active',
+          },
+          this.journalPath,
+        );
+      },
     };
   }
 
@@ -375,7 +570,7 @@ export class AdapterRunManager {
     if (run.status === 'cancelled' || run.status === 'done' || run.status === 'error') {
       return {
         runId: run.runId,
-        verifiedStopped: true,
+        verifiedStopped: Boolean(run.verifiedStoppedAt),
         verificationMethod: run.verificationMethod ?? 'process_group_empty',
       };
     }
@@ -383,9 +578,11 @@ export class AdapterRunManager {
     const driver = this.drivers.get(run.provider);
     if (!run.scenario && driver) {
       const cancelRes = await driver.cancel(run);
-      run.status = 'cancelled';
-      run.verifiedStoppedAt = new Date().toISOString();
-      run.verificationMethod = cancelRes.verificationMethod;
+      stampVerifiedStop(run, cancelRes);
+      run.status = cancelRes.verifiedStopped ? 'cancelled' : 'uncertain';
+      if (cancelRes.verifiedStopped) {
+        recordLaunchStopped(run.runId, this.journalPath);
+      }
       return {
         runId: run.runId,
         verifiedStopped: cancelRes.verifiedStopped,
@@ -449,6 +646,16 @@ export class AdapterRunManager {
   }
 
   private notifyRunEnded(run: AdapterRun): void {
+    if (!run.outcome) {
+      run.outcome = {
+        runId: run.runId,
+        terminalStatus: run.status,
+        verifiedStopped: run.verifiedStoppedAt !== null,
+        verificationMethod: run.verificationMethod,
+        summary: run.status === 'done' ? 'Completed' : undefined,
+        error: run.status === 'error' ? 'Run failed' : undefined,
+      };
+    }
     if (run.stream) {
       run.stream.notifyEnd();
     } else {
@@ -460,6 +667,10 @@ export class AdapterRunManager {
         }
       }
     }
+  }
+
+  getRunOutcome(runId: string): RunOutcome | null {
+    return this.runs.get(runId)?.outcome ?? null;
   }
 
   private executeScenario(run: AdapterRun, scenario: FakeScenario): void {
@@ -584,21 +795,34 @@ export class AdapterRunManager {
     }
 
     // Default 'success' scenario
+    const isIntake = run.purpose === 'intake';
+    const intakeResultContent = isIntake
+      ? synthesizeFakeIntakeResultContent(run.instruction)
+      : null;
+    let intakeResult: IntakeResult | undefined;
+    if (intakeResultContent) {
+      try {
+        intakeResult = IntakeResultSchema.parse(JSON.parse(intakeResultContent));
+      } catch {}
+    }
+
     setTimeout(() => {
-      this.emitEvent(run, {
-        runId: run.runId,
-        sequence: 1,
-        type: 'message.delta',
-        timestamp: new Date().toISOString(),
-        data: { messageId: 'm1', delta: 'Working...' },
-      });
+      if (!intakeResultContent) {
+        this.emitEvent(run, {
+          runId: run.runId,
+          sequence: 1,
+          type: 'message.delta',
+          timestamp: new Date().toISOString(),
+          data: { messageId: 'm1', delta: 'Working...' },
+        });
+      }
 
       this.emitEvent(run, {
         runId: run.runId,
         sequence: 2,
         type: 'message.completed',
         timestamp: new Date().toISOString(),
-        data: { messageId: 'm1', content: 'Working on it, done.' },
+        data: { messageId: 'm1', content: intakeResultContent ?? 'Working on it, done.' },
       });
 
       this.emitEvent(run, {
@@ -614,24 +838,42 @@ export class AdapterRunManager {
       run.verifiedStoppedAt = new Date().toISOString();
       run.verificationMethod = 'process_group_empty';
       run.exitCode = 0;
+      run.outcome = {
+        runId: run.runId,
+        terminalStatus: 'done',
+        intakeResult,
+        summary: isIntake ? 'Intake completed' : 'Task completed',
+        verifiedStopped: true,
+        verificationMethod: 'process_group_empty',
+      };
 
       this.notifyRunEnded(run);
     }, 5);
   }
 
-  private handleDeadlineTimeout(run: AdapterRun): void {
+  private async handleDeadlineTimeout(run: AdapterRun): Promise<void> {
     if (run.status === 'done' || run.status === 'error' || run.status === 'cancelled') {
       return;
     }
     this.clearDeadlineTimer(run);
     const driver = this.drivers.get(run.provider);
+    let result: DriverCancelResult = {
+      verifiedStopped: true,
+      verificationMethod: 'process_group_empty',
+    };
     if (!run.scenario && driver) {
-      driver.cancel(run).catch(() => {});
+      // Await termination before stamping proof — a timeout must not declare
+      // verifiedStopped before the process group is actually confirmed gone.
+      result = await driver.cancel(run).catch(
+        (): DriverCancelResult => ({ verifiedStopped: false, verificationMethod: 'process_group_empty' }),
+      );
     }
-    run.status = 'error';
-    run.verifiedStoppedAt = new Date().toISOString();
-    run.verificationMethod = 'process_group_empty';
-    run.exitCode = 124;
+    stampVerifiedStop(run, result);
+    run.status = result.verifiedStopped ? 'error' : 'uncertain';
+    run.exitCode = result.verifiedStopped ? 124 : null;
+    if (result.verifiedStopped) {
+      recordLaunchStopped(run.runId, this.journalPath);
+    }
 
     const seq = run.lastSequence + 1;
     this.emitEvent(run, {

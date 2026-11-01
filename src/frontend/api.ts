@@ -275,6 +275,13 @@ export async function createRepository(
   return parsed.data;
 }
 
+export async function deleteRepository(id: string, options?: RequestOptions): Promise<void> {
+  await request<unknown>(`/api/repositories/${encodeURIComponent(id)}`, {
+    method: 'DELETE',
+    ...options,
+  });
+}
+
 export interface MessagesResponse {
   messages: Message[];
   nextCursor: string | null;

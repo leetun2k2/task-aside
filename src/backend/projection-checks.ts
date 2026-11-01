@@ -141,7 +141,7 @@ async function main(): Promise<void> {
     await check('auth: GET /api/settings with valid auth.token succeeds with 200', async () => {
       const res = await request(app, 'GET', '/api/settings', { token: TEST_AUTH_TOKEN });
       assert(res.status === 200, `expected 200, got ${res.status}`);
-      assert(res.body.defaultProvider === 'codex', 'expected defaultProvider codex');
+      assert(res.body.defaultProvider === 'claude', 'expected defaultProvider claude');
       assert(res.body.maxConcurrency === 8, 'expected maxConcurrency 8');
       assert(res.body.diagnostics !== undefined, 'expected diagnostics object');
       assert(res.body.diagnostics.service === 'backend', 'expected diagnostics service backend');

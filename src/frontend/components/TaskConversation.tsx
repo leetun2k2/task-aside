@@ -4,6 +4,7 @@ import type { Message } from '../../contracts/chat.ts';
 import type { Task } from '../../contracts/task.ts';
 import { MarkdownView } from './MarkdownView.tsx';
 import { Button } from './ui/Button.tsx';
+import { IconArrowDown, IconInfo, IconSend, IconX, IconZap } from './ui/Icons.tsx';
 
 export interface StreamingDelta {
   taskId?: string;
@@ -266,16 +267,20 @@ export function TaskConversation({
               zIndex: 10,
               padding: '6px 14px',
               borderRadius: '20px',
-              boxShadow: '0 2px 8px rgba(0,0,0,0.15)',
-              background: '#2563eb',
+              boxShadow: '0 4px 14px rgba(99, 102, 241, 0.35)',
+              background: 'var(--color-primary-gradient)',
               color: '#ffffff',
               border: 'none',
               cursor: 'pointer',
               fontSize: '12px',
-              fontWeight: 500,
+              fontWeight: 600,
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '4px',
             }}
           >
-            ↓ Jump to latest
+            <IconArrowDown size={13} />
+            <span>Jump to latest</span>
           </button>
         )}
         <div ref={messagesEndRef} />
@@ -284,7 +289,9 @@ export function TaskConversation({
       {/* HITL Banner if Human Input is Required */}
       {isHitl && (
         <div className="hitl-banner" role="alert">
-          <div className="hitl-banner-icon">⚡</div>
+          <div className="hitl-banner-icon">
+            <IconZap size={20} />
+          </div>
           <div className="hitl-banner-text">
             <strong>Input Required</strong>
             <p>
@@ -298,8 +305,11 @@ export function TaskConversation({
       {/* Queued Message Notice if Task is Processing */}
       {isProcessing && (
         <div className="queued-turn-banner">
-          <span>
-            ℹ Agent is actively running. Messages posted now will be queued for the next safe turn.
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <IconInfo size={14} />
+            <span>
+              Agent is actively running. Messages posted now will be queued for the next safe turn.
+            </span>
           </span>
         </div>
       )}
@@ -307,9 +317,12 @@ export function TaskConversation({
       {/* Terminal Message Notice */}
       {isTerminal && (
         <div className="terminal-turn-banner">
-          <span>
-            Task is {task.status}. Messages sent here are saved to the conversation but will not
-            automatically restart execution.
+          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}>
+            <IconInfo size={14} />
+            <span>
+              Task is {task.status}. Messages sent here are saved to the conversation but will not
+              automatically restart execution.
+            </span>
           </span>
         </div>
       )}
@@ -323,7 +336,7 @@ export function TaskConversation({
             className="composer-error-dismiss"
             onClick={() => setSendError(null)}
           >
-            ✕
+            <IconX size={13} />
           </button>
         </div>
       )}

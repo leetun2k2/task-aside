@@ -1,7 +1,12 @@
 // Task list grouping and collapse hierarchy logic (SPECIFICATION.md §2 T-02, PRD §3).
-import type { Task, TaskPriority, TaskStatus } from '../contracts/task.ts';
+import type { Repository, Task, TaskPriority, TaskStatus } from '../contracts/task.ts';
 
-export type GroupMode = 'state-priority' | 'priority-state';
+export type GroupMode = 'state-priority' | 'priority-state' | 'repository-state';
+
+// Sentinel bucket id for a Message-only task that hasn't resolved a
+// repository yet (specs/2026-10-25-message-intake/01-contracts-and-
+// lifecycle.md "'Auto' repository/provider"). Never a real registered repo id.
+export const UNRESOLVED_REPO_ID = '__unresolved__';
 
 export interface TaskSubgroup {
   id: string;
@@ -22,9 +27,9 @@ export interface TaskGroup {
 }
 
 export const STATE_ORDER: TaskStatus[] = [
-  'processing',
   'hitl',
   'todo',
+  'processing',
   'done',
   'error',
   'cancelled',
@@ -52,7 +57,62 @@ export function isStateDefaultCollapsed(state: TaskStatus): boolean {
   return state === 'done' || state === 'cancelled';
 }
 
-export function groupTasks(tasks: Task[], mode: GroupMode): TaskGroup[] {
+export function groupTasks(
+  tasks: Task[],
+  mode: GroupMode,
+  repositories: Repository[] = [],
+): TaskGroup[] {
+  if (mode === 'repository-state') {
+    const knownRepoIds = new Set<string>();
+    const repoEntries: { id: string; name: string }[] = [];
+
+    for (const repo of repositories) {
+      if (!knownRepoIds.has(repo.id)) {
+        knownRepoIds.add(repo.id);
+        repoEntries.push({ id: repo.id, name: repo.name });
+      }
+    }
+
+    for (const task of tasks) {
+      // Message-only task awaiting Intake has no resolved repository yet
+      // (specs/2026-10-25-message-intake); group it under a visible "Auto"
+      // bucket instead of dropping it from the repository view.
+      const repoId = task.repoId ?? UNRESOLVED_REPO_ID;
+      if (!knownRepoIds.has(repoId)) {
+        knownRepoIds.add(repoId);
+        repoEntries.push({ id: repoId, name: repoId === UNRESOLVED_REPO_ID ? 'Auto' : repoId });
+      }
+    }
+
+    if (repoEntries.length === 0) {
+      return [];
+    }
+
+    return repoEntries.map((repo) => {
+      const repoTasks = tasks.filter((t) => (t.repoId ?? UNRESOLVED_REPO_ID) === repo.id);
+      const subgroups: TaskSubgroup[] = STATE_ORDER.map((state) => {
+        const stateTasks = repoTasks.filter((t) => t.status === state);
+        return {
+          id: `repo-${repo.id}-state-${state}`,
+          label: STATE_LABELS[state],
+          value: state,
+          count: stateTasks.length,
+          isDefaultCollapsed: isStateDefaultCollapsed(state),
+          tasks: stateTasks,
+        };
+      });
+
+      return {
+        id: `repo-${repo.id}`,
+        label: repo.name,
+        value: repo.id,
+        count: repoTasks.length,
+        isDefaultCollapsed: false,
+        subgroups,
+      };
+    });
+  }
+
   if (mode === 'state-priority') {
     return STATE_ORDER.map((state) => {
       const stateTasks = tasks.filter((t) => t.status === state);
@@ -112,7 +172,11 @@ export function loadGroupModePreference(): GroupMode {
   try {
     if (typeof window !== 'undefined' && window.localStorage) {
       const stored = window.localStorage.getItem(STORAGE_KEY_GROUP_MODE);
-      if (stored === 'state-priority' || stored === 'priority-state') {
+      if (
+        stored === 'state-priority' ||
+        stored === 'priority-state' ||
+        stored === 'repository-state'
+      ) {
         return stored;
       }
     }

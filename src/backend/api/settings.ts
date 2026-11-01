@@ -1,9 +1,11 @@
-// Settings REST API routes (SPECIFICATION.md §3, §8.1; TASKS.md T15).
+// Settings REST API routes (SPECIFICATION.md §3, §8.1; TASKS.md T15, LC-02a).
 import type { Database } from 'bun:sqlite';
 import type { Hono } from 'hono';
 import { UpdateSettingsInputSchema } from '../../contracts/settings.ts';
 import { browserAuth } from '../../supervisor/auth.ts';
-import { getDiagnostics, getSettings, updateSettings } from '../domains/settings/settings.ts';
+import { getDiagnosticsUsecase } from '../domains/settings/usecases/get-diagnostics-usecase.ts';
+import { getSettingsUsecase } from '../domains/settings/usecases/get-settings-usecase.ts';
+import { updateSettingsUsecase } from '../domains/settings/usecases/update-settings-usecase.ts';
 import { eventHub } from '../events/hub.ts';
 import { DomainError } from './errors.ts';
 
@@ -16,8 +18,8 @@ export function mountSettingsRoutes(
   app.use('/api/settings', browserAuth({ token: options.token }));
 
   app.get('/api/settings', (c) => {
-    const settings = getSettings(db);
-    const diagnostics = getDiagnostics(db, {
+    const settings = getSettingsUsecase(db);
+    const diagnostics = getDiagnosticsUsecase(db, {
       connectedClients: eventHub.getSubscriberCount(),
     });
     return c.json({
@@ -33,8 +35,8 @@ export function mountSettingsRoutes(
       throw new DomainError('VALIDATION_ERROR', 'invalid settings input', parsed.error.flatten());
     }
 
-    const updated = updateSettings(db, parsed.data);
-    const diagnostics = getDiagnostics(db, {
+    const updated = updateSettingsUsecase(db, parsed.data);
+    const diagnostics = getDiagnosticsUsecase(db, {
       connectedClients: eventHub.getSubscriberCount(),
     });
 

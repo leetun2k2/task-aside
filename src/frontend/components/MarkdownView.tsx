@@ -4,6 +4,7 @@
 import { memo } from 'react';
 import ReactMarkdown from 'react-markdown';
 import remarkGfm from 'remark-gfm';
+import { IconImage } from './ui/Icons.tsx';
 
 interface MarkdownViewProps {
   content: string;
@@ -22,8 +23,14 @@ export const MarkdownView = memo(function MarkdownView({
           // Remote images are converted into safe placeholders to prevent unsolicited tracking fetches
           img({ src, alt }) {
             return (
-              <span className="image-placeholder text-sm text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-300">
-                🖼️ [{alt || 'Image'}] ({src || ''})
+              <span
+                className="image-placeholder text-sm text-gray-500 bg-gray-100 px-2 py-0.5 rounded border border-gray-300"
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}
+              >
+                <IconImage size={13} />
+                <span>
+                  [{alt || 'Image'}] ({src || ''})
+                </span>
               </span>
             );
           },

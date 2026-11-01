@@ -1,4 +1,10 @@
-import type { EventEnvelope, Provider, RunStatus, VerificationMethod } from '../contracts/index.ts';
+import type {
+  EventEnvelope,
+  Provider,
+  RunOutcome,
+  RunStatus,
+  VerificationMethod,
+} from '../contracts/index.ts';
 import type { RunEventStream } from './event-stream.ts';
 
 export type FakeScenario =
@@ -7,15 +13,20 @@ export type FakeScenario =
 export interface AdapterRun {
   runId: string;
   taskId: string;
+  purpose: 'intake' | 'implementation';
   provider: Provider;
   cwd: string;
+  writeRoots: string[];
   instruction: string;
   ownerId: string;
   generation: number;
+  runFence: number;
+  lockGenerations?: Record<string, number>;
   sessionId?: string;
   mcp?: { endpoint: string; accessToken: string };
   scenario?: FakeScenario;
   status: RunStatus;
+  outcome?: RunOutcome;
   events: EventEnvelope[];
   lastSequence: number;
   pendingRequestId: string | null;

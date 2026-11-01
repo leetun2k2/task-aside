@@ -28,19 +28,33 @@ export const GetTaskParamsSchema = z.object({
 });
 export type GetTaskParams = z.infer<typeof GetTaskParamsSchema>;
 
-// `repoId` and `idempotencyKey` are optional at the schema layer because
-// managed callers (child task creation) inherit the parent's repo and are not
-// required to pass either. External callers MUST supply both — enforced in
+// `idempotencyKey` is optional at the schema layer because managed callers
+// (child task creation, including Intake delegation) derive a stable
+// identity from their own run/revision instead
+// (specs/2026-10-25-message-intake/01-contracts-and-lifecycle.md "Child
+// creation stays MCP-owned"). External callers MUST supply it — enforced in
 // `src/backend/mcp/tools.ts#executeCreateTask`, not here, to avoid forking
 // this shared tool schema per role (specs/2026-10-24-handoff-single-writer.md
 // contract table: "External callers must supply repoId and idempotencyKey.
 // Reject missing fields; never select a default repo.").
+//
+// `message` is the only required business field (specs/2026-10-25-message-
+// intake/00-overview.md). `repoId`/`repoIds` are hints, not a constraint —
+// Intake may replace or expand them within the caller's authorized scope.
+// `waitForTaskIds` is only meaningful together with `parentId` set to the
+// delegating task, creating a bounded-prerequisite verification task
+// (04-delegation-and-follow-up.md).
 export const CreateTaskToolParamsSchema = z.object({
-  title: z.string().min(1),
+  message: z.string().trim().min(1).max(32 * 1024),
+  title: z.string().min(1).optional(),
   description: z.string().optional(),
   priority: TaskPrioritySchema.optional(),
   idempotencyKey: z.string().optional(),
   repoId: z.string().optional(),
+  repoIds: z.array(z.string()).optional(),
+  parentId: z.string().optional(),
+  conversationId: z.string().optional(),
+  waitForTaskIds: z.array(z.string()).optional(),
 });
 export type CreateTaskToolParams = z.infer<typeof CreateTaskToolParamsSchema>;
 

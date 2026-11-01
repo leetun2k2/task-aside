@@ -239,8 +239,8 @@ async function runApiAndUiIntegrationChecks(): Promise<void> {
     // 2. Create Root Task
     const rootTask = await createTask(
       {
+        message: 'Build responsive navigation bar with logo and menu',
         title: 'Implement Navigation Header',
-        description: 'Build responsive navigation bar with logo and menu',
         repoId: repo.id,
         priority: 'P1',
       },
@@ -255,6 +255,7 @@ async function runApiAndUiIntegrationChecks(): Promise<void> {
     // 3. Create Child Task
     const childTask = await createTask(
       {
+        message: 'Add Mobile Hamburger Button',
         title: 'Add Mobile Hamburger Button',
         repoId: repo.id,
         priority: 'P2',
@@ -285,7 +286,6 @@ async function runApiAndUiIntegrationChecks(): Promise<void> {
       {
         title: 'Implement Responsive Navigation Header',
         priority: 'P0',
-        description: 'Updated description for responsive design',
       },
       { baseUrl },
     );
@@ -569,6 +569,7 @@ async function runConversationAndSettingsChecks(): Promise<void> {
     );
     const task = await createTask(
       {
+        message: 'Task for Chat and HITL Verification',
         title: 'Task for Chat and HITL Verification',
         repoId: repo.id,
         priority: 'P1',
@@ -576,9 +577,13 @@ async function runConversationAndSettingsChecks(): Promise<void> {
       { baseUrl },
     );
 
-    // 3. Initial Empty Messages
+    // 3. Message-first creation already stores exactly one initial user
+    // message (specs/2026-10-25-message-intake/01-contracts-and-lifecycle.md
+    // "Store content in chat, with a task reference to the initial
+    // message") — it is never an empty conversation.
     const initialMsgs = await fetchMessages(task.id, undefined, { baseUrl });
-    assert(initialMsgs.messages.length === 0, 'initial messages list must be empty');
+    assert(initialMsgs.messages.length === 1, 'task must start with exactly its own initial message');
+    assert(initialMsgs.messages[0].sender === 'user', 'initial message sender must be user');
 
     // 4. Post Message
     const userMsg = await postMessage(
@@ -593,8 +598,11 @@ async function runConversationAndSettingsChecks(): Promise<void> {
     );
 
     const msgsAfterFirst = await fetchMessages(task.id, undefined, { baseUrl });
-    assert(msgsAfterFirst.messages.length === 1, 'must have 1 message');
-    assert(msgsAfterFirst.messages[0].id === userMsg.id, 'message ID must match');
+    assert(msgsAfterFirst.messages.length === 2, 'must have the initial message plus 1 posted message');
+    assert(
+      msgsAfterFirst.messages[1].id === userMsg.id,
+      'second message ID must match the posted message',
+    );
 
     // 5. Queued Messages on Processing Task
     db.query("UPDATE tasks SET status = 'processing' WHERE id = ?").run(task.id);
@@ -608,7 +616,7 @@ async function runConversationAndSettingsChecks(): Promise<void> {
     const taskDuringProcessing = await fetchTaskById(task.id, { baseUrl });
     assert(taskDuringProcessing.status === 'processing', 'task must remain in processing state');
     const msgsDuringProcessing = await fetchMessages(task.id, undefined, { baseUrl });
-    assert(msgsDuringProcessing.messages.length === 2, 'must have 2 messages in conversation');
+    assert(msgsDuringProcessing.messages.length === 3, 'must have 3 messages in conversation');
 
     // 6. HITL input_required and Atomic Reply
     const requestId = `req_${Date.now()}`;
@@ -696,7 +704,7 @@ async function runConversationAndSettingsChecks(): Promise<void> {
 
     // 8. Settings & Diagnostics
     const initialSettings = await fetchSettings({ baseUrl, token: authToken });
-    assert(initialSettings.defaultProvider === 'codex', 'default provider must be codex');
+    assert(initialSettings.defaultProvider === 'claude', 'default provider must be claude');
     assert(initialSettings.maxConcurrency === 8, 'default concurrency must be 8');
     assert(initialSettings.diagnostics.service === 'backend', 'service must be backend');
     assert(initialSettings.diagnostics.tasksCount >= 1, 'tasksCount must be >= 1');
@@ -712,15 +720,15 @@ async function runConversationAndSettingsChecks(): Promise<void> {
 
     // Update settings
     const updatedSettings = await updateSettings(
-      { defaultProvider: 'claude', maxConcurrency: 5 },
+      { defaultProvider: 'agy', maxConcurrency: 5 },
       { baseUrl, token: authToken },
     );
-    assert(updatedSettings.defaultProvider === 'claude', 'updated provider must be claude');
+    assert(updatedSettings.defaultProvider === 'agy', 'updated provider must be agy');
     assert(updatedSettings.maxConcurrency === 5, 'updated concurrency must be 5');
 
     // Refetch settings to verify DB persistence
     const refetchedSettings = await fetchSettings({ baseUrl, token: authToken });
-    assert(refetchedSettings.defaultProvider === 'claude', 'refetched provider must be claude');
+    assert(refetchedSettings.defaultProvider === 'agy', 'refetched provider must be agy');
     assert(refetchedSettings.maxConcurrency === 5, 'refetched concurrency must be 5');
 
     // 9. SSE Reconnect & Authoritative REST Synchronization
